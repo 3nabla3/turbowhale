@@ -219,6 +219,83 @@ pub fn parse_uci_move_string(move_string: &str, position: &crate::board::Positio
     }
 }
 
+enum LineOutcome {
+    Continue,
+    Quit,
+}
+
+#[instrument(skip(output))]
+fn handle_stdin_line(
+    line: &str,
+    output: &mut impl Write,
+    current_position: &mut Position,
+    debug_mode: &mut bool,
+) -> LineOutcome {
+    let command = parse_uci_command(line);
+
+    match command {
+        UciCommand::Uci => {
+            writeln!(output, "id name chess-engine").unwrap();
+            writeln!(output, "id author chess-engine").unwrap();
+            writeln!(output, "uciok").unwrap();
+            output.flush().unwrap();
+        }
+
+        UciCommand::Debug(enabled) => {
+            *debug_mode = enabled;
+        }
+
+        UciCommand::IsReady => {
+            writeln!(output, "readyok").unwrap();
+            output.flush().unwrap();
+        }
+
+        UciCommand::SetOption { .. } => {
+            // No options implemented yet
+        }
+
+        UciCommand::UciNewGame => {
+            *current_position = start_position();
+        }
+
+        UciCommand::Position { fen, moves } => {
+            *current_position = from_fen(&fen);
+            for uci_move_string in &moves {
+                let chess_move = parse_uci_move_string(uci_move_string, current_position);
+                *current_position = apply_move(current_position, chess_move);
+            }
+        }
+
+        UciCommand::Go(_parameters) => {
+            let span = tracing::info_span!("go_command");
+            let _guard = span.enter();
+            let legal_moves = generate_legal_moves(current_position);
+            if legal_moves.is_empty() {
+                writeln!(output, "bestmove 0000").unwrap();
+            } else {
+                let chosen_move = select_move(current_position, &legal_moves);
+                writeln!(output, "bestmove {}", move_to_uci_string(chosen_move)).unwrap();
+            }
+            output.flush().unwrap();
+        }
+
+        UciCommand::Stop | UciCommand::PonderHit => {
+            // No-op for random mover
+        }
+
+        UciCommand::Quit => {
+            return LineOutcome::Quit;
+        }
+
+        UciCommand::Unknown(text) => {
+            if *debug_mode {
+                eprintln!("Unknown UCI command: {}", text);
+            }
+        }
+    }
+    LineOutcome::Continue
+}
+
 /// Runs the main UCI input/output loop.
 /// Reads commands from `input`, writes responses to `output`.
 /// Returns when the `quit` command is received.
@@ -238,67 +315,11 @@ pub fn run_uci_loop(
             }
         };
 
-        let command = parse_uci_command(&line);
-
-        match command {
-            UciCommand::Uci => {
-                writeln!(output, "id name chess-engine").unwrap();
-                writeln!(output, "id author chess-engine").unwrap();
-                writeln!(output, "uciok").unwrap();
-                output.flush().unwrap();
-            }
-
-            UciCommand::Debug(enabled) => {
-                debug_mode = enabled;
-            }
-
-            UciCommand::IsReady => {
-                writeln!(output, "readyok").unwrap();
-                output.flush().unwrap();
-            }
-
-            UciCommand::SetOption { .. } => {
-                // No options implemented yet
-            }
-
-            UciCommand::UciNewGame => {
-                current_position = start_position();
-            }
-
-            UciCommand::Position { fen, moves } => {
-                current_position = from_fen(&fen);
-                for uci_move_string in &moves {
-                    let chess_move = parse_uci_move_string(uci_move_string, &current_position);
-                    current_position = apply_move(&current_position, chess_move);
-                }
-            }
-
-            UciCommand::Go(_parameters) => {
-                let span = tracing::info_span!("go_command");
-                let _guard = span.enter();
-                let legal_moves = generate_legal_moves(&current_position);
-                if legal_moves.is_empty() {
-                    writeln!(output, "bestmove 0000").unwrap();
-                } else {
-                    let chosen_move = select_move(&current_position, &legal_moves);
-                    writeln!(output, "bestmove {}", move_to_uci_string(chosen_move)).unwrap();
-                }
-                output.flush().unwrap();
-            }
-
-            UciCommand::Stop | UciCommand::PonderHit => {
-                // No-op for random mover
-            }
-
-            UciCommand::Quit => {
-                break;
-            }
-
-            UciCommand::Unknown(text) => {
-                if debug_mode {
-                    eprintln!("Unknown UCI command: {}", text);
-                }
-            }
+        if matches!(
+            handle_stdin_line(&line, output, &mut current_position, &mut debug_mode),
+            LineOutcome::Quit
+        ) {
+            break;
         }
     }
 }
