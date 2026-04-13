@@ -97,7 +97,7 @@ Reads from `stdin` line by line in a loop. Parses each command and dispatches to
 
 | Command | Response / Action |
 |---|---|
-| `uci` | Print `id name chess-engine`, `id author <author>`, `uciok` |
+| `uci` | Print `id name turbowhale`, `id author <author>`, `uciok` |
 | `debug on\|off` | Toggle internal debug flag |
 | `isready` | Print `readyok` |
 | `setoption name <x> value <y>` | Store option; ignored for now |

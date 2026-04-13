@@ -35,7 +35,7 @@
 
 ```toml
 [package]
-name = "chess-engine"
+name = "turbowhale"
 version = "0.1.0"
 edition = "2024"
 
@@ -2401,8 +2401,8 @@ pub fn run_uci_loop(
 
         match command {
             UciCommand::Uci => {
-                writeln!(output, "id name chess-engine").unwrap();
-                writeln!(output, "id author chess-engine").unwrap();
+                writeln!(output, "id name turbowhale").unwrap();
+                writeln!(output, "id author 3nabla3").unwrap();
                 writeln!(output, "uciok").unwrap();
                 output.flush().unwrap();
             }
@@ -2471,7 +2471,7 @@ Add to the `tests` module in `src/uci.rs`:
         let mut output = Vec::new();
         run_uci_loop(std::io::BufReader::new(input.as_ref()), &mut output);
         let response = String::from_utf8(output).unwrap();
-        assert!(response.contains("id name chess-engine"));
+        assert!(response.contains("id name turbowhale"));
         assert!(response.contains("uciok"));
     }
 
@@ -2550,8 +2550,8 @@ Expected: all tests pass
 Run: `echo -e "uci\nisready\nposition startpos\ngo\nquit" | cargo run`
 Expected output (exact move will vary):
 ```
-id name chess-engine
-id author chess-engine
+id name turbowhale
+id author 3nabla3
 uciok
 readyok
 bestmove <some move like e2e4>

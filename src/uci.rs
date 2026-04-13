@@ -261,8 +261,8 @@ fn handle_uci_line(
 
     match command {
         UciCommand::Uci => {
-            writeln!(output, "id name chess-engine").unwrap();
-            writeln!(output, "id author chess-engine").unwrap();
+            writeln!(output, "id name turbowhale").unwrap();
+            writeln!(output, "id author 3nabla3").unwrap();
             writeln!(output, "uciok").unwrap();
             output.flush().unwrap();
         }

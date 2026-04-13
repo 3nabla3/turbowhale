@@ -1171,8 +1171,8 @@ fn handle_stdin_line(
 
     match command {
         UciCommand::Uci => {
-            writeln!(output, "id name chess-engine").unwrap();
-            writeln!(output, "id author chess-engine").unwrap();
+            writeln!(output, "id name turbowhale").unwrap();
+            writeln!(output, "id author 3nabla3").unwrap();
             writeln!(output, "uciok").unwrap();
             output.flush().unwrap();
         }
@@ -1297,7 +1297,7 @@ echo -e "uci\nisready\nposition startpos\ngo depth 5\nquit" | cargo run --releas
 
 Expected output includes:
 ```
-id name chess-engine
+id name turbowhale
 uciok
 readyok
 bestmove <some move like e2e4>

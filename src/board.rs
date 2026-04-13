@@ -314,7 +314,7 @@ pub fn start_position() -> Position {
 
 /// Applies a move to a position, returning the new position.
 /// This is a pure function — the input position is not modified.
-#[tracing::instrument]
+#[tracing::instrument(level = "debug", skip(position))]
 pub fn apply_move(position: &Position, chess_move: Move) -> Position {
     let mut new_position = position.clone();
 
