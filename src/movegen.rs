@@ -1,6 +1,7 @@
 use std::sync::OnceLock;
 
 use crate::board::{Color, Move, MoveFlags, PieceType, Position};
+use tracing;
 
 // File masks: FILE_MASKS[0] = file A (squares 0,8,16,...,56)
 pub const FILE_MASKS: [u64; 8] = {
@@ -626,6 +627,23 @@ fn generate_king_moves(king: u64, own_occupancy: u64, position: &Position, color
     }
 }
 
+/// Generates all fully legal moves for the side to move.
+/// Filters pseudo-legal moves by ensuring the king is not in check after the move.
+#[tracing::instrument(skip(position))]
+pub fn generate_legal_moves(position: &Position) -> Vec<Move> {
+    let pseudo_legal_moves = generate_pseudo_legal_moves(position);
+    let moving_color = position.side_to_move;
+
+    pseudo_legal_moves
+        .into_iter()
+        .filter(|&chess_move| {
+            let position_after_move = crate::board::apply_move(position, chess_move);
+            let king_square = position_after_move.king_square(moving_color);
+            !is_square_attacked(king_square, moving_color.opponent(), &position_after_move)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -713,5 +731,20 @@ mod tests {
             })
             .collect();
         assert_eq!(knight_moves.len(), 4, "Nb1-a3, Nb1-c3, Ng1-f3, Ng1-h3");
+    }
+
+    #[test]
+    fn start_position_has_twenty_legal_moves() {
+        let position = crate::board::start_position();
+        let legal_moves = generate_legal_moves(&position);
+        assert_eq!(legal_moves.len(), 20, "16 pawn + 4 knight moves");
+    }
+
+    #[test]
+    fn checkmate_position_has_zero_legal_moves() {
+        // Fool's mate: 1.f3 e5 2.g4 Qh4# — Black queen delivers checkmate
+        let position = crate::board::from_fen("rnb1kbnr/pppp1ppp/8/4p3/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq - 1 3");
+        let legal_moves = generate_legal_moves(&position);
+        assert_eq!(legal_moves.len(), 0, "white is in checkmate");
     }
 }
