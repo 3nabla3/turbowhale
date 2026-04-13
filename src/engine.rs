@@ -5,7 +5,7 @@ use crate::board::{Color, Move, MoveFlags, PieceType, Position};
 use crate::eval::evaluate;
 use crate::movegen::{generate_legal_moves, generate_pseudo_legal_moves, is_square_attacked};
 use crate::tt::{compute_hash, NodeType, TranspositionTable, TtEntry};
-use crate::uci::GoParameters;
+use crate::uci::{GoParameters, move_to_uci_string};
 
 pub const MATE_SCORE: i32 = 100_000;
 const INF: i32 = 200_000;
@@ -59,8 +59,44 @@ pub fn select_move(
         }
 
         let position_hash = compute_hash(position);
+        
+        // UCI logging - show search info for each depth
+        let elapsed = context.start_time.elapsed();
+        let nodes = context.nodes_searched;
+        let nps = if elapsed.as_millis() > 0 {
+            (nodes as f64 / elapsed.as_millis() as f64 * 1000.0) as u64
+        } else {
+            0
+        };
+        
         if let Some(tt_entry) = context.transposition_table.probe(position_hash) {
             best_move = tt_entry.best_move;
+            
+            // Handle mate scores specially
+            let (score_type, score_value) = if tt_entry.score.abs() > MATE_SCORE / 2 {
+                let moves_to_mate = (MATE_SCORE - tt_entry.score.abs() + 1) / 2;
+                ("mate", moves_to_mate)
+            } else {
+                ("cp", tt_entry.score)
+            };
+            
+            println!("info depth {} score {} {} nodes {} nps {} time {} pv {}",
+                depth,
+                score_type,
+                score_value,
+                nodes,
+                nps,
+                elapsed.as_millis(),
+                move_to_uci_string(best_move)
+            );
+        } else {
+            // Still log even if no TT entry
+            println!("info depth {} nodes {} nps {} time {}",
+                depth,
+                nodes,
+                nps,
+                elapsed.as_millis()
+            );
         }
     }
 
