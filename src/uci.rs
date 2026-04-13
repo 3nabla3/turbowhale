@@ -267,8 +267,6 @@ fn handle_stdin_line(
         }
 
         UciCommand::Go(_parameters) => {
-            let span = tracing::info_span!("go_command");
-            let _guard = span.enter();
             let legal_moves = generate_legal_moves(current_position);
             if legal_moves.is_empty() {
                 writeln!(output, "bestmove 0000").unwrap();

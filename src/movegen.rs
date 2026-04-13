@@ -256,41 +256,28 @@ pub fn is_square_attacked(square: usize, attacking_color: Color, position: &Posi
 /// Pseudo-legal moves are valid in terms of piece movement rules
 /// but may leave the king in check.
 pub fn generate_pseudo_legal_moves(position: &Position) -> Vec<Move> {
+    let color = position.side_to_move;
+    let (own_pawns, own_knights, own_bishops, own_rooks, own_queens, own_king, own_occupancy, enemy_occupancy) =
+        match color {
+            Color::White => (
+                position.white_pawns,   position.white_knights, position.white_bishops,
+                position.white_rooks,   position.white_queens,  position.white_king,
+                position.white_occupancy, position.black_occupancy,
+            ),
+            Color::Black => (
+                position.black_pawns,   position.black_knights, position.black_bishops,
+                position.black_rooks,   position.black_queens,  position.black_king,
+                position.black_occupancy, position.white_occupancy,
+            ),
+        };
+
     let mut moves = Vec::new();
-
-    match position.side_to_move {
-        Color::White => {
-            generate_pawn_moves(
-                position.white_pawns,
-                position.black_occupancy,
-                position.all_occupancy,
-                position.en_passant_square,
-                Color::White,
-                &mut moves,
-            );
-            generate_knight_moves(position.white_knights, position.white_occupancy, &mut moves);
-            generate_bishop_moves(position.white_bishops, position.white_occupancy, position.all_occupancy, &mut moves);
-            generate_rook_moves(position.white_rooks, position.white_occupancy, position.all_occupancy, &mut moves);
-            generate_queen_moves(position.white_queens, position.white_occupancy, position.all_occupancy, &mut moves);
-            generate_king_moves(position.white_king, position.white_occupancy, position, Color::White, &mut moves);
-        }
-        Color::Black => {
-            generate_pawn_moves(
-                position.black_pawns,
-                position.white_occupancy,
-                position.all_occupancy,
-                position.en_passant_square,
-                Color::Black,
-                &mut moves,
-            );
-            generate_knight_moves(position.black_knights, position.black_occupancy, &mut moves);
-            generate_bishop_moves(position.black_bishops, position.black_occupancy, position.all_occupancy, &mut moves);
-            generate_rook_moves(position.black_rooks, position.black_occupancy, position.all_occupancy, &mut moves);
-            generate_queen_moves(position.black_queens, position.black_occupancy, position.all_occupancy, &mut moves);
-            generate_king_moves(position.black_king, position.black_occupancy, position, Color::Black, &mut moves);
-        }
-    }
-
+    generate_pawn_moves(own_pawns, enemy_occupancy, position.all_occupancy, position.en_passant_square, color, &mut moves);
+    generate_knight_moves(own_knights, own_occupancy, &mut moves);
+    generate_bishop_moves(own_bishops, own_occupancy, position.all_occupancy, &mut moves);
+    generate_rook_moves(own_rooks, own_occupancy, position.all_occupancy, &mut moves);
+    generate_queen_moves(own_queens, own_occupancy, position.all_occupancy, &mut moves);
+    generate_king_moves(own_king, own_occupancy, position, color, &mut moves);
     moves
 }
 
@@ -628,7 +615,7 @@ fn generate_king_moves(king: u64, own_occupancy: u64, position: &Position, color
 
 /// Generates all fully legal moves for the side to move.
 /// Filters pseudo-legal moves by ensuring the king is not in check after the move.
-#[tracing::instrument(skip(position))]
+#[tracing::instrument]
 pub fn generate_legal_moves(position: &Position) -> Vec<Move> {
     let pseudo_legal_moves = generate_pseudo_legal_moves(position);
     let moving_color = position.side_to_move;
