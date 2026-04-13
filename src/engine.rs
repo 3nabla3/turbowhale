@@ -396,6 +396,30 @@ fn order_moves(mut moves: Vec<Move>, position: &Position, tt_best_move: Option<M
     moves
 }
 
+fn extract_pv_from_tt(root: &Position, tt: &TranspositionTable, max_depth: u32) -> Vec<Move> {
+    use std::collections::HashSet;
+    let mut pv = Vec::new();
+    let mut current_position = root.clone();
+    let mut visited_hashes: HashSet<u64> = HashSet::new();
+
+    for _ in 0..max_depth {
+        let hash = compute_hash(&current_position);
+        if visited_hashes.contains(&hash) {
+            break;
+        }
+        visited_hashes.insert(hash);
+        match tt.probe(hash) {
+            Some(entry) => {
+                pv.push(entry.best_move);
+                current_position = crate::board::apply_move(&current_position, entry.best_move);
+            }
+            None => break,
+        }
+    }
+
+    pv
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -483,5 +507,27 @@ mod tests {
         };
         let score = negamax_pvs(&position, 1, -INF, INF, 0, &mut context);
         assert!(score < -MATE_SCORE / 2, "checkmate should return large negative, got {}", score);
+    }
+
+    #[test]
+    fn extract_pv_from_tt_returns_moves_up_to_depth() {
+        let position = start_position();
+        let mut tt = make_tt();
+        let stop = make_stop();
+        let params = GoParameters { depth: Some(3), ..Default::default() };
+        // Run a search so the TT is populated
+        select_move(&position, &params, &mut tt, &stop);
+        // PV should have at least 1 move and at most 3
+        let pv = extract_pv_from_tt(&position, &tt, 3);
+        assert!(!pv.is_empty(), "PV must contain at least the best move");
+        assert!(pv.len() <= 3, "PV must not exceed requested depth");
+    }
+
+    #[test]
+    fn extract_pv_from_tt_returns_empty_on_empty_tt() {
+        let position = start_position();
+        let tt = make_tt();
+        let pv = extract_pv_from_tt(&position, &tt, 5);
+        assert!(pv.is_empty(), "empty TT should yield empty PV");
     }
 }
