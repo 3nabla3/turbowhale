@@ -352,8 +352,11 @@ pub fn apply_move(position: &Position, chess_move: Move) -> Position {
         (Color::Black, PieceType::King)   => new_position.black_king    &= !from_bit,
     }
 
-    // Remove any captured enemy piece from the destination square
-    if chess_move.move_flags.contains(MoveFlags::CAPTURE) {
+    // Remove any captured enemy piece from the destination square.
+    // Always clear enemy pieces at the destination regardless of MoveFlags::CAPTURE, because
+    // sliding piece (rook, bishop, queen) and knight move generators do not set the CAPTURE flag
+    // even when the move lands on an enemy piece. En passant is handled separately below.
+    if !chess_move.move_flags.contains(MoveFlags::EN_PASSANT) {
         match position.side_to_move {
             Color::White => {
                 new_position.black_pawns   &= !to_bit;
