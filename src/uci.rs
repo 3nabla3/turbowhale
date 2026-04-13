@@ -1,4 +1,10 @@
+use std::io::{BufRead, Write};
+
 use tracing::instrument;
+
+use crate::board::{from_fen, start_position, Position};
+use crate::engine::select_move;
+use crate::movegen::generate_legal_moves;
 
 const START_POSITION_FEN: &str =
     "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
@@ -232,6 +238,89 @@ pub fn parse_uci_move_string(move_string: &str, position: &crate::board::Positio
     }
 }
 
+/// Runs the main UCI input/output loop.
+/// Reads commands from `input`, writes responses to `output`.
+/// Returns when the `quit` command is received.
+#[instrument(skip(input, output))]
+pub fn run_uci_loop(
+    input: impl BufRead,
+    output: &mut impl Write,
+) {
+    let mut current_position: Position = start_position();
+    let mut debug_mode = false;
+
+    for line in input.lines() {
+        let line = match line {
+            Ok(line) => line,
+            Err(error) => {
+                eprintln!("Error reading UCI input: {}", error);
+                break;
+            }
+        };
+
+        let command = parse_uci_command(&line);
+
+        match command {
+            UciCommand::Uci => {
+                writeln!(output, "id name chess-engine").unwrap();
+                writeln!(output, "id author chess-engine").unwrap();
+                writeln!(output, "uciok").unwrap();
+                output.flush().unwrap();
+            }
+
+            UciCommand::Debug(enabled) => {
+                debug_mode = enabled;
+            }
+
+            UciCommand::IsReady => {
+                writeln!(output, "readyok").unwrap();
+                output.flush().unwrap();
+            }
+
+            UciCommand::SetOption { .. } => {
+                // No options implemented yet
+            }
+
+            UciCommand::UciNewGame => {
+                current_position = start_position();
+            }
+
+            UciCommand::Position { fen, moves } => {
+                current_position = from_fen(&fen);
+                for uci_move_string in &moves {
+                    let chess_move = parse_uci_move_string(uci_move_string, &current_position);
+                    current_position = crate::board::apply_move(&current_position, chess_move);
+                }
+            }
+
+            UciCommand::Go(_parameters) => {
+                let legal_moves = generate_legal_moves(&current_position);
+                if legal_moves.is_empty() {
+                    writeln!(output, "bestmove (none)").unwrap();
+                } else {
+                    let chosen_move = select_move(&current_position, &legal_moves);
+                    writeln!(output, "bestmove {}", move_to_uci_string(chosen_move)).unwrap();
+                }
+                output.flush().unwrap();
+            }
+
+            UciCommand::Stop | UciCommand::PonderHit => {
+                // No-op for random mover
+            }
+
+            UciCommand::Quit => {
+                break;
+            }
+
+            UciCommand::Unknown(text) => {
+                if debug_mode {
+                    eprintln!("Unknown UCI command: {}", text);
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,5 +377,33 @@ mod tests {
             }
             _ => panic!("Expected Go command"),
         }
+    }
+
+    #[test]
+    fn uci_command_produces_uciok_response() {
+        let input = b"uci\nquit\n";
+        let mut output = Vec::new();
+        run_uci_loop(std::io::BufReader::new(input.as_ref()), &mut output);
+        let response = String::from_utf8(output).unwrap();
+        assert!(response.contains("id name chess-engine"));
+        assert!(response.contains("uciok"));
+    }
+
+    #[test]
+    fn isready_produces_readyok() {
+        let input = b"isready\nquit\n";
+        let mut output = Vec::new();
+        run_uci_loop(std::io::BufReader::new(input.as_ref()), &mut output);
+        let response = String::from_utf8(output).unwrap();
+        assert!(response.contains("readyok"));
+    }
+
+    #[test]
+    fn go_produces_bestmove() {
+        let input = b"position startpos\ngo\nquit\n";
+        let mut output = Vec::new();
+        run_uci_loop(std::io::BufReader::new(input.as_ref()), &mut output);
+        let response = String::from_utf8(output).unwrap();
+        assert!(response.contains("bestmove"), "response: {}", response);
     }
 }
