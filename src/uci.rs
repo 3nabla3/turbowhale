@@ -2,7 +2,7 @@ use std::io::{BufRead, Write};
 
 use tracing::instrument;
 
-use crate::board::{from_fen, start_position, Position};
+use crate::board::{apply_move, from_fen, start_position, Position};
 use crate::engine::select_move;
 use crate::movegen::generate_legal_moves;
 
@@ -289,14 +289,14 @@ pub fn run_uci_loop(
                 current_position = from_fen(&fen);
                 for uci_move_string in &moves {
                     let chess_move = parse_uci_move_string(uci_move_string, &current_position);
-                    current_position = crate::board::apply_move(&current_position, chess_move);
+                    current_position = apply_move(&current_position, chess_move);
                 }
             }
 
             UciCommand::Go(_parameters) => {
                 let legal_moves = generate_legal_moves(&current_position);
                 if legal_moves.is_empty() {
-                    writeln!(output, "bestmove (none)").unwrap();
+                    writeln!(output, "bestmove 0000").unwrap();
                 } else {
                     let chosen_move = select_move(&current_position, &legal_moves);
                     writeln!(output, "bestmove {}", move_to_uci_string(chosen_move)).unwrap();
