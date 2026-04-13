@@ -61,7 +61,7 @@ pub struct Move {
     pub move_flags: MoveFlags,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Position {
     // Piece bitboards — one per piece type per color
     pub white_pawns: u64,
@@ -141,6 +141,85 @@ impl Position {
             | self.black_queens
             | self.black_king;
         self.all_occupancy = self.white_occupancy | self.black_occupancy;
+    }
+}
+
+/// Renders a Position as a FEN string for readable output in traces and logs.
+impl std::fmt::Debug for Position {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Piece placement: rank 8 (index 7) down to rank 1 (index 0)
+        let mut fen = String::new();
+        for rank in (0..8).rev() {
+            let mut empty_count: u8 = 0;
+            for file in 0..8u8 {
+                let bit = 1u64 << (rank * 8 + file as usize);
+                let piece_char =
+                    if self.white_pawns & bit != 0        { Some('P') }
+                    else if self.white_knights & bit != 0 { Some('N') }
+                    else if self.white_bishops & bit != 0 { Some('B') }
+                    else if self.white_rooks & bit != 0   { Some('R') }
+                    else if self.white_queens & bit != 0  { Some('Q') }
+                    else if self.white_king & bit != 0    { Some('K') }
+                    else if self.black_pawns & bit != 0   { Some('p') }
+                    else if self.black_knights & bit != 0 { Some('n') }
+                    else if self.black_bishops & bit != 0 { Some('b') }
+                    else if self.black_rooks & bit != 0   { Some('r') }
+                    else if self.black_queens & bit != 0  { Some('q') }
+                    else if self.black_king & bit != 0    { Some('k') }
+                    else                                  { None };
+                match piece_char {
+                    Some(character) => {
+                        if empty_count > 0 {
+                            fen.push((b'0' + empty_count) as char);
+                            empty_count = 0;
+                        }
+                        fen.push(character);
+                    }
+                    None => empty_count += 1,
+                }
+            }
+            if empty_count > 0 {
+                fen.push((b'0' + empty_count) as char);
+            }
+            if rank > 0 {
+                fen.push('/');
+            }
+        }
+
+        // Side to move
+        let side_char = match self.side_to_move {
+            Color::White => 'w',
+            Color::Black => 'b',
+        };
+
+        // Castling rights
+        let castling = if self.castling_rights == 0 {
+            "-".to_string()
+        } else {
+            let mut castling_string = String::new();
+            if self.castling_rights & (1 << 0) != 0 { castling_string.push('K'); }
+            if self.castling_rights & (1 << 1) != 0 { castling_string.push('Q'); }
+            if self.castling_rights & (1 << 2) != 0 { castling_string.push('k'); }
+            if self.castling_rights & (1 << 3) != 0 { castling_string.push('q'); }
+            castling_string
+        };
+
+        // En passant square
+        let en_passant = match self.en_passant_square {
+            None => "-".to_string(),
+            Some(square) => {
+                let file = square % 8;
+                let rank = square / 8;
+                format!("{}{}", (b'a' + file) as char, (b'1' + rank) as char)
+            }
+        };
+
+        write!(
+            formatter,
+            "{} {} {} {} {} {}",
+            fen, side_char, castling, en_passant,
+            self.halfmove_clock, self.fullmove_number
+        )
     }
 }
 
@@ -235,7 +314,7 @@ pub fn start_position() -> Position {
 
 /// Applies a move to a position, returning the new position.
 /// This is a pure function — the input position is not modified.
-#[tracing::instrument(skip(position))]
+#[tracing::instrument]
 pub fn apply_move(position: &Position, chess_move: Move) -> Position {
     let mut new_position = position.clone();
 
