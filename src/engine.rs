@@ -95,7 +95,7 @@ fn negamax_pvs(
     position: &Position,
     depth: u32,
     mut alpha: i32,
-    beta: i32,
+    mut beta: i32,
     ply: u32,
     context: &mut SearchContext,
 ) -> i32 {
@@ -151,9 +151,8 @@ fn negamax_pvs(
                     }
                 }
                 NodeType::UpperBound => {
-                    let new_beta = beta.min(tt_entry.score);
-                    if alpha >= new_beta {
-                        return tt_entry.score;
+                    if tt_entry.score < beta {
+                        beta = tt_entry.score;
                     }
                 }
             }
