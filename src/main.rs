@@ -1,5 +1,6 @@
 mod board;
 mod engine;
+mod eval;
 mod movegen;
 mod telemetry;
 mod uci;
