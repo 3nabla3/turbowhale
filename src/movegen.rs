@@ -615,7 +615,7 @@ fn generate_king_moves(king: u64, own_occupancy: u64, position: &Position, color
 
 /// Generates all fully legal moves for the side to move.
 /// Filters pseudo-legal moves by ensuring the king is not in check after the move.
-#[tracing::instrument]
+#[tracing::instrument(level = "debug", skip(position))]
 pub fn generate_legal_moves(position: &Position) -> Vec<Move> {
     let pseudo_legal_moves = generate_pseudo_legal_moves(position);
     let moving_color = position.side_to_move;

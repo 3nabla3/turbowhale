@@ -424,7 +424,7 @@ mod tests {
         let mut output = Vec::new();
         run_uci_loop(std::io::BufReader::new(input.as_ref()), &mut output);
         let response = String::from_utf8(output).unwrap();
-        assert!(response.contains("id name chess-engine"));
+        assert!(response.contains("id name turbowhale"));
         assert!(response.contains("uciok"));
     }
 
