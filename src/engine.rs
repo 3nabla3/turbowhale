@@ -4,7 +4,7 @@ use tracing::instrument;
 use crate::board::{Move, Position};
 
 /// Selects a random move from the list of legal moves.
-#[instrument(skip(_position, legal_moves))]
+#[instrument(skip(legal_moves))]
 pub fn select_move(_position: &Position, legal_moves: &[Move]) -> Move {
     let mut rng = rand::rng();
     *legal_moves
