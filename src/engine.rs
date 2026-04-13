@@ -60,8 +60,6 @@ pub fn select_move(
         }
 
         let position_hash = compute_hash(position);
-        
-        // UCI logging - show search info for each depth
         let elapsed = context.start_time.elapsed();
         let nodes = context.nodes_searched;
         let nps = if elapsed.as_millis() > 0 {
@@ -69,34 +67,42 @@ pub fn select_move(
         } else {
             0
         };
-        
+
         if let Some(tt_entry) = context.transposition_table.probe(position_hash) {
             best_move = tt_entry.best_move;
-            
-            // Handle mate scores specially
-            let (score_type, score_value) = if tt_entry.score.abs() > MATE_SCORE / 2 {
+
+            let score_field = if tt_entry.score.abs() > MATE_SCORE / 2 {
                 let moves_to_mate = (MATE_SCORE - tt_entry.score.abs() + 1) / 2;
-                ("mate", moves_to_mate)
+                let signed_moves_to_mate = if tt_entry.score > 0 {
+                    moves_to_mate
+                } else {
+                    -moves_to_mate
+                };
+                format!("mate {}", signed_moves_to_mate)
             } else {
-                ("cp", tt_entry.score)
+                format!("cp {}", tt_entry.score)
             };
-            
-            println!("info depth {} score {} {} nodes {} nps {} time {} pv {}",
+
+            let pv = extract_pv_from_tt(position, context.transposition_table, depth);
+            let pv_string = pv.iter()
+                .map(|&chess_move| move_to_uci_string(chess_move))
+                .collect::<Vec<_>>()
+                .join(" ");
+
+            println!("info depth {} score {} nodes {} nps {} time {} pv {}",
                 depth,
-                score_type,
-                score_value,
+                score_field,
                 nodes,
                 nps,
                 elapsed.as_millis(),
-                move_to_uci_string(best_move)
+                pv_string,
             );
         } else {
-            // Still log even if no TT entry
             println!("info depth {} nodes {} nps {} time {}",
                 depth,
                 nodes,
                 nps,
-                elapsed.as_millis()
+                elapsed.as_millis(),
             );
         }
     }
@@ -533,5 +539,17 @@ mod tests {
         let tt = make_tt();
         let pv = extract_pv_from_tt(&position, &tt, 5);
         assert!(pv.is_empty(), "empty TT should yield empty PV");
+    }
+
+    #[test]
+    fn select_move_emits_uci_info_line_to_stdout() {
+        let position = start_position();
+        let mut tt = make_tt();
+        let stop = make_stop();
+        let params = GoParameters { depth: Some(2), ..Default::default() };
+        // Should not panic — this is the main assertion
+        let chosen = select_move(&position, &params, &mut tt, &stop);
+        let legal_moves = generate_legal_moves(&position);
+        assert!(legal_moves.contains(&chosen));
     }
 }
