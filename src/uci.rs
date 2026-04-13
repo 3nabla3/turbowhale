@@ -26,6 +26,7 @@ pub struct GoParameters {
     pub mate_in_moves: Option<u32>,
     pub move_time_ms: Option<u64>,
     pub infinite: bool,
+    pub perft_depth: Option<u32>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -127,6 +128,7 @@ fn parse_go_parameters(remainder: &str) -> GoParameters {
             "nodes"       => { parameters.nodes = tokens.next().and_then(|v| v.parse().ok()); }
             "mate"        => { parameters.mate_in_moves = tokens.next().and_then(|v| v.parse().ok()); }
             "movetime"    => { parameters.move_time_ms = tokens.next().and_then(|v| v.parse().ok()); }
+            "perft"       => { parameters.perft_depth = tokens.next().and_then(|v| v.parse().ok()); }
             "searchmoves" => {
                 parameters.search_moves = tokens.by_ref().map(String::from).collect();
             }
@@ -462,5 +464,16 @@ mod tests {
         let input = b"ucinewgame\nposition startpos\ngo depth 2\nquit\n";
         let mut output = Vec::new();
         run_uci_loop(std::io::BufReader::new(input.as_ref()), &mut output);
+    }
+
+    #[test]
+    fn parse_go_perft_sets_perft_depth() {
+        let command = parse_uci_command("go perft 5");
+        match command {
+            UciCommand::Go(parameters) => {
+                assert_eq!(parameters.perft_depth, Some(5));
+            }
+            _ => panic!("Expected Go command"),
+        }
     }
 }
