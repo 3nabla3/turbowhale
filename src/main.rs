@@ -3,6 +3,7 @@ mod engine;
 mod eval;
 mod movegen;
 mod telemetry;
+mod tt;
 mod uci;
 
 #[tokio::main]
