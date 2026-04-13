@@ -1,3 +1,5 @@
+use std::sync::OnceLock;
+
 use crate::board::Color;
 
 // File masks: FILE_MASKS[0] = file A (squares 0,8,16,...,56)
@@ -74,8 +76,6 @@ pub fn pawn_attacks_for_square(square: usize, color: Color) -> u64 {
     }
 }
 
-use std::sync::OnceLock;
-
 // Per-square diagonal masks (NE-SW direction)
 static SQUARE_DIAGONAL_MASKS: OnceLock<[u64; 64]> = OnceLock::new();
 // Per-square anti-diagonal masks (NW-SE direction)
@@ -115,27 +115,6 @@ fn get_anti_diagonal_masks() -> &'static [u64; 64] {
     })
 }
 
-/// Flips a bitboard along the a1-h8 diagonal (transposes the 8x8 board).
-/// Used as the "reverse" function for diagonal ray attacks.
-fn flip_diagonal_a1h8(mut board: u64) -> u64 {
-    const K1: u64 = 0x5500550055005500;
-    const K2: u64 = 0x3333000033330000;
-    const K4: u64 = 0x0f0f0f0f00000000;
-    let mut t = K4 & (board ^ (board << 28));
-    board ^= t ^ (t >> 28);
-    t = K2 & (board ^ (board << 14));
-    board ^= t ^ (t >> 14);
-    t = K1 & (board ^ (board << 7));
-    board ^= t ^ (t >> 7);
-    board
-}
-
-/// Flips a bitboard along the a8-h1 anti-diagonal.
-/// Used as the "reverse" function for anti-diagonal ray attacks.
-fn flip_anti_diagonal_a8h1(board: u64) -> u64 {
-    flip_diagonal_a1h8(board.swap_bytes())
-}
-
 /// Computes rook attacks along the file (N/S) using hyperbola quintessence.
 /// Reverse function: swap_bytes (reverses rank order).
 fn compute_file_attacks(square: usize, occupancy: u64) -> u64 {
@@ -164,12 +143,15 @@ fn compute_rank_attacks(square: usize, occupancy: u64) -> u64 {
     let backward = reversed_occupancy
         .wrapping_sub(reversed_piece.wrapping_mul(2))
         .reverse_bits();
+    // Unlike file/diagonal attacks, the rank mask includes the piece square itself,
+    // so we must explicitly exclude it from the result.
     let attacks_byte = (forward ^ backward) & !piece_bit;
     (attacks_byte as u64) << rank_shift
 }
 
 /// Computes bishop attacks along the diagonal (NE/SW) using hyperbola quintessence.
-/// Uses reverse_bits as the reversal function since diagonal bits are spaced 9 apart.
+/// Uses reverse_bits as the reversal function: after masking to the diagonal,
+/// reverse_bits correctly inverts the bit ordering within the isolated subset.
 fn compute_diagonal_attacks(square: usize, occupancy: u64) -> u64 {
     let piece_bit = 1u64 << square;
     let diagonal_mask = get_diagonal_masks()[square];
@@ -184,7 +166,8 @@ fn compute_diagonal_attacks(square: usize, occupancy: u64) -> u64 {
 }
 
 /// Computes bishop attacks along the anti-diagonal (NW/SE) using hyperbola quintessence.
-/// Uses reverse_bits as the reversal function since anti-diagonal bits are spaced 7 apart.
+/// Uses reverse_bits as the reversal function: after masking to the anti-diagonal,
+/// reverse_bits correctly inverts the bit ordering within the isolated subset.
 fn compute_anti_diagonal_attacks(square: usize, occupancy: u64) -> u64 {
     let piece_bit = 1u64 << square;
     let anti_diagonal_mask = get_anti_diagonal_masks()[square];
