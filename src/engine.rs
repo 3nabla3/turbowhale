@@ -100,7 +100,7 @@ fn negamax_pvs(
     context: &mut SearchContext,
 ) -> i32 {
     context.nodes_searched += 1;
-    if context.nodes_searched % 1024 == 0 {
+    if context.nodes_searched.is_multiple_of(1024) {
         if context.stop_flag.load(Ordering::Relaxed) {
             return 0;
         }
@@ -216,7 +216,7 @@ fn quiescence_search(
     context: &mut SearchContext,
 ) -> i32 {
     context.nodes_searched += 1;
-    if context.nodes_searched % 1024 == 0 {
+    if context.nodes_searched.is_multiple_of(1024) {
         if context.stop_flag.load(Ordering::Relaxed) {
             return 0;
         }

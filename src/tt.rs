@@ -1,6 +1,6 @@
 use std::sync::OnceLock;
 
-use crate::board::{Color, Move, MoveFlags, Position};
+use crate::board::{Color, Move, Position};
 
 // --- Types ---
 
@@ -74,10 +74,10 @@ fn zobrist_keys() -> &'static ZobristKeys {
         };
 
         let mut pieces = [[[0u64; 64]; 6]; 2];
-        for color in 0..2 {
-            for piece in 0..6 {
-                for square in 0..64 {
-                    pieces[color][piece][square] = next();
+        for color_pieces in &mut pieces {
+            for piece_squares in color_pieces {
+                for square_key in piece_squares {
+                    *square_key = next();
                 }
             }
         }
@@ -136,7 +136,7 @@ pub fn compute_hash(position: &Position) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::board::{from_fen, start_position};
+    use crate::board::{from_fen, start_position, MoveFlags};
 
     #[test]
     fn start_position_hash_is_nonzero() {
