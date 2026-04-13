@@ -1,3 +1,5 @@
+use tracing;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Color {
     White,
@@ -173,6 +175,95 @@ impl Position {
     }
 }
 
+/// Parses a FEN string into a Position.
+///
+/// Square indexing: a1=0, b1=1, …, h1=7, a2=8, …, h8=63.
+#[tracing::instrument]
+pub fn from_fen(fen: &str) -> Position {
+    let mut parts = fen.split_whitespace();
+    let piece_placement = parts.next().expect("FEN missing piece placement");
+    let active_color = parts.next().expect("FEN missing active color");
+    let castling_availability = parts.next().expect("FEN missing castling");
+    let en_passant_target = parts.next().expect("FEN missing en passant");
+    let halfmove_clock_str = parts.next().expect("FEN missing halfmove clock");
+    let fullmove_number_str = parts.next().expect("FEN missing fullmove number");
+
+    let mut position = Position::empty();
+
+    // Parse piece placement: FEN lists rank 8 first (index 7), down to rank 1 (index 0)
+    let mut rank: i32 = 7;
+    let mut file: i32 = 0;
+    for character in piece_placement.chars() {
+        match character {
+            '/' => {
+                rank -= 1;
+                file = 0;
+            }
+            '1'..='8' => {
+                file += character as i32 - '0' as i32;
+            }
+            piece_char => {
+                let square = (rank * 8 + file) as usize;
+                let bit = 1u64 << square;
+                match piece_char {
+                    'P' => position.white_pawns |= bit,
+                    'N' => position.white_knights |= bit,
+                    'B' => position.white_bishops |= bit,
+                    'R' => position.white_rooks |= bit,
+                    'Q' => position.white_queens |= bit,
+                    'K' => position.white_king |= bit,
+                    'p' => position.black_pawns |= bit,
+                    'n' => position.black_knights |= bit,
+                    'b' => position.black_bishops |= bit,
+                    'r' => position.black_rooks |= bit,
+                    'q' => position.black_queens |= bit,
+                    'k' => position.black_king |= bit,
+                    _ => panic!("Unknown FEN piece character: {}", piece_char),
+                }
+                file += 1;
+            }
+        }
+    }
+
+    position.side_to_move = match active_color {
+        "w" => Color::White,
+        "b" => Color::Black,
+        _ => panic!("Unknown active color in FEN: {}", active_color),
+    };
+
+    position.castling_rights = castling_availability
+        .chars()
+        .fold(0u8, |rights, character| match character {
+            'K' => rights | (1 << 0),
+            'Q' => rights | (1 << 1),
+            'k' => rights | (1 << 2),
+            'q' => rights | (1 << 3),
+            '-' => rights,
+            _ => panic!("Unknown castling character in FEN: {}", character),
+        });
+
+    position.en_passant_square = if en_passant_target == "-" {
+        None
+    } else {
+        let file_char = en_passant_target.chars().next().expect("empty en passant");
+        let rank_char = en_passant_target.chars().nth(1).expect("en passant missing rank");
+        let file_index = (file_char as u8 - b'a') as u8;
+        let rank_index = (rank_char as u8 - b'1') as u8;
+        Some(rank_index * 8 + file_index)
+    };
+
+    position.halfmove_clock = halfmove_clock_str.parse().expect("invalid halfmove clock");
+    position.fullmove_number = fullmove_number_str.parse().expect("invalid fullmove number");
+
+    position.recompute_occupancy();
+    position
+}
+
+/// Returns the starting chess position.
+pub fn start_position() -> Position {
+    from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,5 +305,33 @@ mod tests {
     fn empty_position_side_to_move_is_white() {
         let position = Position::empty();
         assert_eq!(position.side_to_move, Color::White);
+    }
+
+    #[test]
+    fn from_fen_parses_start_position_white_pieces() {
+        let position = from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+        // White pawns on rank 2 (squares 8–15)
+        assert_eq!(position.white_pawns, 0x000000000000FF00);
+        // White rooks on a1 (0) and h1 (7)
+        assert_eq!(position.white_rooks, 0x0000000000000081);
+        // White king on e1 (4)
+        assert_eq!(position.white_king, 1u64 << 4);
+    }
+
+    #[test]
+    fn from_fen_parses_start_position_state() {
+        let position = from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+        assert_eq!(position.side_to_move, Color::White);
+        assert_eq!(position.castling_rights, 0b00001111); // all four castling rights
+        assert_eq!(position.en_passant_square, None);
+        assert_eq!(position.halfmove_clock, 0);
+        assert_eq!(position.fullmove_number, 1);
+    }
+
+    #[test]
+    fn from_fen_parses_en_passant_square() {
+        // After 1.e4 — en passant target is e3 (square 20)
+        let position = from_fen("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1");
+        assert_eq!(position.en_passant_square, Some(20)); // e3 = rank2*8+file4 = 2*8+4 = 20
     }
 }
