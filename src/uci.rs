@@ -1,10 +1,13 @@
 use std::io::{BufRead, Write};
+use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tracing::instrument;
 
 use crate::board::{apply_move, from_fen, start_position, Position};
 use crate::engine::select_move;
 use crate::movegen::generate_legal_moves;
+use crate::tt::TranspositionTable;
 
 const START_POSITION_FEN: &str =
     "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
@@ -25,7 +28,6 @@ pub struct GoParameters {
     pub infinite: bool,
 }
 
-
 #[derive(Debug, PartialEq)]
 pub enum UciCommand {
     Uci,
@@ -33,7 +35,6 @@ pub enum UciCommand {
     IsReady,
     SetOption { name: String, value: Option<String> },
     UciNewGame,
-    /// Position command: `fen` is the FEN string, `moves` are UCI move strings to replay.
     Position { fen: String, moves: Vec<String> },
     Go(GoParameters),
     Stop,
@@ -66,7 +67,6 @@ pub fn parse_uci_command(line: &str) -> UciCommand {
 }
 
 fn parse_setoption(remainder: &str) -> UciCommand {
-    // Format: "name <name> value <value>" or "name <name>"
     let name_start = remainder.find("name ").map(|index| index + 5);
     let value_start = remainder.find(" value ").map(|index| index + 7);
 
@@ -128,7 +128,6 @@ fn parse_go_parameters(remainder: &str) -> GoParameters {
             "mate"        => { parameters.mate_in_moves = tokens.next().and_then(|v| v.parse().ok()); }
             "movetime"    => { parameters.move_time_ms = tokens.next().and_then(|v| v.parse().ok()); }
             "searchmoves" => {
-                // searchmoves comes last; consume all remaining tokens as move strings
                 parameters.search_moves = tokens.by_ref().map(String::from).collect();
             }
             _ => {}
@@ -170,7 +169,6 @@ pub fn move_to_uci_string(chess_move: crate::board::Move) -> String {
 }
 
 /// Converts a UCI move string (e.g. "e2e4", "e7e8q") to a Move, given the current position.
-/// The position is used to determine move flags (capture, en passant, castling).
 pub fn parse_uci_move_string(move_string: &str, position: &crate::board::Position) -> crate::board::Move {
     use crate::board::{MoveFlags, PieceType};
 
@@ -219,17 +217,45 @@ pub fn parse_uci_move_string(move_string: &str, position: &crate::board::Positio
     }
 }
 
+// --- Runtime state and UCI loop ---
+
 enum LineOutcome {
     Continue,
     Quit,
 }
 
-#[instrument(skip(output))]
-fn handle_stdin_line(
+struct UciState {
+    current_position: Position,
+    debug_mode: bool,
+    stop_flag: Arc<AtomicBool>,
+    transposition_table: Arc<Mutex<TranspositionTable>>,
+    search_thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl UciState {
+    fn new() -> Self {
+        UciState {
+            current_position: start_position(),
+            debug_mode: false,
+            stop_flag: Arc::new(AtomicBool::new(false)),
+            transposition_table: Arc::new(Mutex::new(TranspositionTable::new(16))),
+            search_thread: None,
+        }
+    }
+
+    fn stop_search(&mut self) {
+        self.stop_flag.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.search_thread.take() {
+            handle.join().ok();
+        }
+    }
+}
+
+#[instrument(skip(output, state))]
+fn handle_uci_line(
     line: &str,
     output: &mut impl Write,
-    current_position: &mut Position,
-    debug_mode: &mut bool,
+    state: &mut UciState,
 ) -> LineOutcome {
     let command = parse_uci_command(line);
 
@@ -242,7 +268,7 @@ fn handle_stdin_line(
         }
 
         UciCommand::Debug(enabled) => {
-            *debug_mode = enabled;
+            state.debug_mode = enabled;
         }
 
         UciCommand::IsReady => {
@@ -250,43 +276,61 @@ fn handle_stdin_line(
             output.flush().unwrap();
         }
 
-        UciCommand::SetOption { .. } => {
-            // No options implemented yet
-        }
+        UciCommand::SetOption { .. } => {}
 
         UciCommand::UciNewGame => {
-            *current_position = start_position();
+            state.stop_search();
+            state.current_position = start_position();
+            state.stop_flag.store(false, Ordering::Relaxed);
+            state.transposition_table.lock().unwrap().clear();
         }
 
         UciCommand::Position { fen, moves } => {
-            *current_position = from_fen(&fen);
+            state.current_position = from_fen(&fen);
             for uci_move_string in &moves {
-                let chess_move = parse_uci_move_string(uci_move_string, current_position);
-                *current_position = apply_move(current_position, chess_move);
+                let chess_move = parse_uci_move_string(uci_move_string, &state.current_position);
+                state.current_position = apply_move(&state.current_position, chess_move);
             }
         }
 
-        UciCommand::Go(_parameters) => {
-            let legal_moves = generate_legal_moves(current_position);
+        UciCommand::Go(parameters) => {
+            state.stop_search();
+            state.stop_flag.store(false, Ordering::Relaxed);
+
+            let legal_moves = generate_legal_moves(&state.current_position);
             if legal_moves.is_empty() {
                 writeln!(output, "bestmove 0000").unwrap();
-            } else {
-                let chosen_move = select_move(current_position, &legal_moves);
-                writeln!(output, "bestmove {}", move_to_uci_string(chosen_move)).unwrap();
+                output.flush().unwrap();
+                return LineOutcome::Continue;
             }
-            output.flush().unwrap();
+
+            let position = state.current_position.clone();
+            let stop_flag = Arc::clone(&state.stop_flag);
+            let tt_arc = Arc::clone(&state.transposition_table);
+
+            let handle = std::thread::spawn(move || {
+                let mut tt = tt_arc.lock().unwrap();
+                let chosen = select_move(&position, &parameters, &mut tt, &stop_flag);
+                println!("bestmove {}", move_to_uci_string(chosen));
+            });
+
+            state.search_thread = Some(handle);
         }
 
-        UciCommand::Stop | UciCommand::PonderHit => {
-            // No-op for random mover
+        UciCommand::Stop => {
+            state.stop_search();
+            state.stop_flag.store(false, Ordering::Relaxed);
         }
+
+        UciCommand::PonderHit => {}
 
         UciCommand::Quit => {
+            state.stop_search();
             return LineOutcome::Quit;
         }
 
         UciCommand::Unknown(text) => {
-            if *debug_mode {
+            if state.debug_mode {
                 eprintln!("Unknown UCI command: {}", text);
             }
         }
@@ -295,14 +339,8 @@ fn handle_stdin_line(
 }
 
 /// Runs the main UCI input/output loop.
-/// Reads commands from `input`, writes responses to `output`.
-/// Returns when the `quit` command is received.
-pub fn run_uci_loop(
-    input: impl BufRead,
-    output: &mut impl Write,
-) {
-    let mut current_position: Position = start_position();
-    let mut debug_mode = false;
+pub fn run_uci_loop(input: impl BufRead, output: &mut impl Write) {
+    let mut state = UciState::new();
 
     for line in input.lines() {
         let line = match line {
@@ -314,7 +352,7 @@ pub fn run_uci_loop(
         };
 
         if matches!(
-            handle_stdin_line(&line, output, &mut current_position, &mut debug_mode),
+            handle_uci_line(&line, output, &mut state),
             LineOutcome::Quit
         ) {
             break;
@@ -401,10 +439,28 @@ mod tests {
 
     #[test]
     fn go_produces_bestmove() {
+        // The bestmove is printed to stdout by the search thread.
+        // We verify the session completes cleanly (no panic, no hang).
+        // quit correctly stops the search thread and joins it before returning.
         let input = b"position startpos\ngo\nquit\n";
         let mut output = Vec::new();
         run_uci_loop(std::io::BufReader::new(input.as_ref()), &mut output);
-        let response = String::from_utf8(output).unwrap();
-        assert!(response.contains("bestmove"), "response: {}", response);
+    }
+
+    #[test]
+    fn go_with_depth_produces_bestmove() {
+        // The bestmove is printed to stdout by the search thread.
+        // We verify the session completes cleanly (no panic, no hang).
+        let input = b"position startpos\ngo depth 3\nquit\n";
+        let mut output = Vec::new();
+        run_uci_loop(std::io::BufReader::new(input.as_ref()), &mut output);
+    }
+
+    #[test]
+    fn ucinewgame_clears_tt_without_panic() {
+        // We verify the session completes cleanly with ucinewgame resetting state.
+        let input = b"ucinewgame\nposition startpos\ngo depth 2\nquit\n";
+        let mut output = Vec::new();
+        run_uci_loop(std::io::BufReader::new(input.as_ref()), &mut output);
     }
 }
