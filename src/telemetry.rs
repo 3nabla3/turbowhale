@@ -20,16 +20,12 @@ impl Drop for OtelGuard {
 /// Initializes the OpenTelemetry tracing stack.
 ///
 /// Reads `OTEL_BACKEND_URL` from the environment (loaded from `.env` by the caller).
-/// Defaults to `http://localhost:4317` if not set.
 ///
 /// Returns an `OtelGuard` that flushes spans when dropped.
-pub fn init() -> OtelGuard {
-    let backend_url = std::env::var("OTEL_BACKEND_URL")
-        .unwrap_or_else(|_| "http://localhost:4317".to_string());
-
+pub fn init(backend_url: &str) -> OtelGuard {
     let exporter = opentelemetry_otlp::SpanExporter::builder()
         .with_tonic()
-        .with_endpoint(&backend_url)
+        .with_endpoint(backend_url)
         .build()
         .expect("Failed to build OTLP span exporter");
 
@@ -60,6 +56,6 @@ mod tests {
     #[tokio::test]
     async fn telemetry_init_does_not_panic() {
         // Guard is dropped at end of scope, triggering shutdown.
-        let _guard = super::init();
+        let _guard = super::init("http://localhost:4317");
     }
 }
