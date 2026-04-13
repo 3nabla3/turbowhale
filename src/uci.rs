@@ -222,7 +222,6 @@ pub fn parse_uci_move_string(move_string: &str, position: &crate::board::Positio
 /// Runs the main UCI input/output loop.
 /// Reads commands from `input`, writes responses to `output`.
 /// Returns when the `quit` command is received.
-#[instrument(skip(input, output))]
 pub fn run_uci_loop(
     input: impl BufRead,
     output: &mut impl Write,
@@ -275,6 +274,8 @@ pub fn run_uci_loop(
             }
 
             UciCommand::Go(_parameters) => {
+                let span = tracing::info_span!("go_command");
+                let _guard = span.enter();
                 let legal_moves = generate_legal_moves(&current_position);
                 if legal_moves.is_empty() {
                     writeln!(output, "bestmove 0000").unwrap();
