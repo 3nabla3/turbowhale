@@ -264,6 +264,162 @@ pub fn start_position() -> Position {
     from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
 }
 
+/// Applies a move to a position, returning the new position.
+/// This is a pure function — the input position is not modified.
+#[tracing::instrument(skip(position))]
+pub fn apply_move(position: &Position, chess_move: Move) -> Position {
+    let mut new_position = position.clone();
+
+    let from_bit = 1u64 << chess_move.from_square;
+    let to_bit = 1u64 << chess_move.to_square;
+
+    // Determine the type of the moving piece
+    let moving_piece_type = if position.white_pawns & from_bit != 0 || position.black_pawns & from_bit != 0 {
+        PieceType::Pawn
+    } else if position.white_knights & from_bit != 0 || position.black_knights & from_bit != 0 {
+        PieceType::Knight
+    } else if position.white_bishops & from_bit != 0 || position.black_bishops & from_bit != 0 {
+        PieceType::Bishop
+    } else if position.white_rooks & from_bit != 0 || position.black_rooks & from_bit != 0 {
+        PieceType::Rook
+    } else if position.white_queens & from_bit != 0 || position.black_queens & from_bit != 0 {
+        PieceType::Queen
+    } else {
+        PieceType::King
+    };
+
+    // Remove the moving piece from its source square
+    match (position.side_to_move, moving_piece_type) {
+        (Color::White, PieceType::Pawn)   => new_position.white_pawns   &= !from_bit,
+        (Color::White, PieceType::Knight) => new_position.white_knights &= !from_bit,
+        (Color::White, PieceType::Bishop) => new_position.white_bishops &= !from_bit,
+        (Color::White, PieceType::Rook)   => new_position.white_rooks   &= !from_bit,
+        (Color::White, PieceType::Queen)  => new_position.white_queens  &= !from_bit,
+        (Color::White, PieceType::King)   => new_position.white_king    &= !from_bit,
+        (Color::Black, PieceType::Pawn)   => new_position.black_pawns   &= !from_bit,
+        (Color::Black, PieceType::Knight) => new_position.black_knights &= !from_bit,
+        (Color::Black, PieceType::Bishop) => new_position.black_bishops &= !from_bit,
+        (Color::Black, PieceType::Rook)   => new_position.black_rooks   &= !from_bit,
+        (Color::Black, PieceType::Queen)  => new_position.black_queens  &= !from_bit,
+        (Color::Black, PieceType::King)   => new_position.black_king    &= !from_bit,
+    }
+
+    // Remove any captured enemy piece from the destination square
+    if chess_move.move_flags.contains(MoveFlags::CAPTURE) {
+        match position.side_to_move {
+            Color::White => {
+                new_position.black_pawns   &= !to_bit;
+                new_position.black_knights &= !to_bit;
+                new_position.black_bishops &= !to_bit;
+                new_position.black_rooks   &= !to_bit;
+                new_position.black_queens  &= !to_bit;
+            }
+            Color::Black => {
+                new_position.white_pawns   &= !to_bit;
+                new_position.white_knights &= !to_bit;
+                new_position.white_bishops &= !to_bit;
+                new_position.white_rooks   &= !to_bit;
+                new_position.white_queens  &= !to_bit;
+            }
+        }
+    }
+
+    // Place the moving piece (or promotion piece) on the destination square
+    let destination_piece_type = chess_move.promotion_piece.unwrap_or(moving_piece_type);
+    match (position.side_to_move, destination_piece_type) {
+        (Color::White, PieceType::Pawn)   => new_position.white_pawns   |= to_bit,
+        (Color::White, PieceType::Knight) => new_position.white_knights |= to_bit,
+        (Color::White, PieceType::Bishop) => new_position.white_bishops |= to_bit,
+        (Color::White, PieceType::Rook)   => new_position.white_rooks   |= to_bit,
+        (Color::White, PieceType::Queen)  => new_position.white_queens  |= to_bit,
+        (Color::White, PieceType::King)   => new_position.white_king    |= to_bit,
+        (Color::Black, PieceType::Pawn)   => new_position.black_pawns   |= to_bit,
+        (Color::Black, PieceType::Knight) => new_position.black_knights |= to_bit,
+        (Color::Black, PieceType::Bishop) => new_position.black_bishops |= to_bit,
+        (Color::Black, PieceType::Rook)   => new_position.black_rooks   |= to_bit,
+        (Color::Black, PieceType::Queen)  => new_position.black_queens  |= to_bit,
+        (Color::Black, PieceType::King)   => new_position.black_king    |= to_bit,
+    }
+
+    // En passant: remove the captured pawn (which is NOT on the destination square)
+    if chess_move.move_flags.contains(MoveFlags::EN_PASSANT) {
+        let captured_pawn_square = match position.side_to_move {
+            Color::White => chess_move.to_square - 8,
+            Color::Black => chess_move.to_square + 8,
+        };
+        match position.side_to_move {
+            Color::White => new_position.black_pawns &= !(1u64 << captured_pawn_square),
+            Color::Black => new_position.white_pawns &= !(1u64 << captured_pawn_square),
+        }
+    }
+
+    // Castling: move the rook to its new square
+    if chess_move.move_flags.contains(MoveFlags::CASTLING) {
+        let (rook_from_square, rook_to_square) = match (position.side_to_move, chess_move.to_square) {
+            (Color::White, 6)  => (7u8, 5u8),   // white kingside:  h1 -> f1
+            (Color::White, 2)  => (0u8, 3u8),   // white queenside: a1 -> d1
+            (Color::Black, 62) => (63u8, 61u8), // black kingside:  h8 -> f8
+            (Color::Black, 58) => (56u8, 59u8), // black queenside: a8 -> d8
+            _ => panic!("Invalid castling destination square: {}", chess_move.to_square),
+        };
+        match position.side_to_move {
+            Color::White => {
+                new_position.white_rooks &= !(1u64 << rook_from_square);
+                new_position.white_rooks |= 1u64 << rook_to_square;
+            }
+            Color::Black => {
+                new_position.black_rooks &= !(1u64 << rook_from_square);
+                new_position.black_rooks |= 1u64 << rook_to_square;
+            }
+        }
+    }
+
+    // Update castling rights: revoke rights for any moved king or rook
+    new_position.castling_rights &= castling_rights_mask_after_move(chess_move);
+
+    // Update en passant square: set for double pawn push, clear otherwise
+    new_position.en_passant_square = if chess_move.move_flags.contains(MoveFlags::DOUBLE_PAWN_PUSH) {
+        let en_passant_target_square = match position.side_to_move {
+            Color::White => chess_move.from_square + 8,
+            Color::Black => chess_move.from_square - 8,
+        };
+        Some(en_passant_target_square)
+    } else {
+        None
+    };
+
+    // Update halfmove clock: reset on pawn move or capture, otherwise increment
+    new_position.halfmove_clock =
+        if moving_piece_type == PieceType::Pawn || chess_move.move_flags.contains(MoveFlags::CAPTURE) {
+            0
+        } else {
+            position.halfmove_clock + 1
+        };
+
+    // Fullmove number increments after black's move
+    if position.side_to_move == Color::Black {
+        new_position.fullmove_number += 1;
+    }
+
+    new_position.side_to_move = position.side_to_move.opponent();
+    new_position.recompute_occupancy();
+    new_position
+}
+
+/// Returns a bitmask to AND with castling_rights after a move to revoke any lost rights.
+fn castling_rights_mask_after_move(chess_move: Move) -> u8 {
+    let mut mask = 0b11111111u8;
+    // King moves: revoke both rights for that color
+    if chess_move.from_square == 4  { mask &= !0b00000011; } // white king from e1
+    if chess_move.from_square == 60 { mask &= !0b00001100; } // black king from e8
+    // Rook moves or captures: revoke the specific rook's right
+    if chess_move.from_square == 7  || chess_move.to_square == 7  { mask &= !0b00000001; } // h1
+    if chess_move.from_square == 0  || chess_move.to_square == 0  { mask &= !0b00000010; } // a1
+    if chess_move.from_square == 63 || chess_move.to_square == 63 { mask &= !0b00000100; } // h8
+    if chess_move.from_square == 56 || chess_move.to_square == 56 { mask &= !0b00001000; } // a8
+    mask
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -333,5 +489,51 @@ mod tests {
         // After 1.e4 — en passant target is e3 (square 20)
         let position = from_fen("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1");
         assert_eq!(position.en_passant_square, Some(20)); // e3 = rank2*8+file4 = 2*8+4 = 20
+    }
+
+    #[test]
+    fn apply_move_white_pawn_single_push() {
+        let position = from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+        // e2 (square 12) -> e3 (square 20)
+        let chess_move = Move {
+            from_square: 12,
+            to_square: 20,
+            promotion_piece: None,
+            move_flags: MoveFlags::NONE,
+        };
+        let new_position = apply_move(&position, chess_move);
+        assert_eq!(new_position.white_pawns & (1u64 << 12), 0, "pawn should have left e2");
+        assert_ne!(new_position.white_pawns & (1u64 << 20), 0, "pawn should be on e3");
+        assert_eq!(new_position.side_to_move, Color::Black);
+        assert_eq!(new_position.en_passant_square, None);
+    }
+
+    #[test]
+    fn apply_move_white_pawn_double_push_sets_en_passant() {
+        let position = from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+        // e2 (12) -> e4 (28)
+        let chess_move = Move {
+            from_square: 12,
+            to_square: 28,
+            promotion_piece: None,
+            move_flags: MoveFlags::DOUBLE_PAWN_PUSH,
+        };
+        let new_position = apply_move(&position, chess_move);
+        assert_eq!(new_position.en_passant_square, Some(20)); // e3 is the target
+    }
+
+    #[test]
+    fn apply_move_capture_removes_captured_piece() {
+        // White pawn on e5 (36), black pawn on d6 (43). White captures d6.
+        let position = from_fen("8/8/3p4/4P3/8/8/8/8 w - - 0 1");
+        let chess_move = Move {
+            from_square: 36, // e5
+            to_square: 43,   // d6
+            promotion_piece: None,
+            move_flags: MoveFlags::CAPTURE,
+        };
+        let new_position = apply_move(&position, chess_move);
+        assert_eq!(new_position.black_pawns & (1u64 << 43), 0, "black pawn on d6 should be captured");
+        assert_ne!(new_position.white_pawns & (1u64 << 43), 0, "white pawn should be on d6");
     }
 }
