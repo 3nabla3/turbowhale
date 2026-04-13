@@ -1,5 +1,3 @@
-use tracing;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Color {
     White,
@@ -37,10 +35,6 @@ impl MoveFlags {
 
     pub fn contains(self, other: MoveFlags) -> bool {
         (self.0 & other.0) == other.0
-    }
-
-    pub fn is_empty(self) -> bool {
-        self.0 == 0
     }
 }
 
@@ -130,31 +124,6 @@ impl Position {
             Color::Black => self.black_king,
         };
         king_bitboard.trailing_zeros() as usize
-    }
-
-    /// Returns the piece type on the given square for the given color, if any.
-    pub fn piece_type_on_square(&self, square: usize, color: Color) -> Option<PieceType> {
-        let bit = 1u64 << square;
-        match color {
-            Color::White => {
-                if self.white_pawns & bit != 0 { Some(PieceType::Pawn) }
-                else if self.white_knights & bit != 0 { Some(PieceType::Knight) }
-                else if self.white_bishops & bit != 0 { Some(PieceType::Bishop) }
-                else if self.white_rooks & bit != 0 { Some(PieceType::Rook) }
-                else if self.white_queens & bit != 0 { Some(PieceType::Queen) }
-                else if self.white_king & bit != 0 { Some(PieceType::King) }
-                else { None }
-            }
-            Color::Black => {
-                if self.black_pawns & bit != 0 { Some(PieceType::Pawn) }
-                else if self.black_knights & bit != 0 { Some(PieceType::Knight) }
-                else if self.black_bishops & bit != 0 { Some(PieceType::Bishop) }
-                else if self.black_rooks & bit != 0 { Some(PieceType::Rook) }
-                else if self.black_queens & bit != 0 { Some(PieceType::Queen) }
-                else if self.black_king & bit != 0 { Some(PieceType::King) }
-                else { None }
-            }
-        }
     }
 
     /// Recomputes the derived occupancy bitboards from the piece bitboards.
@@ -247,8 +216,8 @@ pub fn from_fen(fen: &str) -> Position {
     } else {
         let file_char = en_passant_target.chars().next().expect("empty en passant");
         let rank_char = en_passant_target.chars().nth(1).expect("en passant missing rank");
-        let file_index = (file_char as u8 - b'a') as u8;
-        let rank_index = (rank_char as u8 - b'1') as u8;
+        let file_index = file_char as u8 - b'a';
+        let rank_index = rank_char as u8 - b'1';
         Some(rank_index * 8 + file_index)
     };
 

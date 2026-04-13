@@ -9,7 +9,7 @@ use crate::movegen::generate_legal_moves;
 const START_POSITION_FEN: &str =
     "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Default, PartialEq)]
 pub struct GoParameters {
     pub search_moves: Vec<String>,
     pub ponder: bool,
@@ -25,24 +25,6 @@ pub struct GoParameters {
     pub infinite: bool,
 }
 
-impl Default for GoParameters {
-    fn default() -> Self {
-        GoParameters {
-            search_moves: Vec::new(),
-            ponder: false,
-            white_time_remaining_ms: None,
-            black_time_remaining_ms: None,
-            white_increment_ms: None,
-            black_increment_ms: None,
-            moves_to_go: None,
-            depth: None,
-            nodes: None,
-            mate_in_moves: None,
-            move_time_ms: None,
-            infinite: false,
-        }
-    }
-}
 
 #[derive(Debug, PartialEq)]
 pub enum UciCommand {
@@ -100,11 +82,10 @@ fn parse_setoption(remainder: &str) -> UciCommand {
 }
 
 fn parse_position(remainder: &str) -> UciCommand {
-    let (fen, moves_section) = if remainder.starts_with("startpos") {
-        let after_startpos = remainder["startpos".len()..].trim();
+    let (fen, moves_section) = if let Some(after_startpos) = remainder.strip_prefix("startpos") {
+        let after_startpos = after_startpos.trim();
         (START_POSITION_FEN.to_string(), after_startpos)
-    } else if remainder.starts_with("fen ") {
-        let after_fen_keyword = &remainder["fen ".len()..];
+    } else if let Some(after_fen_keyword) = remainder.strip_prefix("fen ") {
         if let Some(moves_index) = after_fen_keyword.find(" moves ") {
             let fen_string = after_fen_keyword[..moves_index].trim().to_string();
             let moves_section = &after_fen_keyword[moves_index + " moves ".len()..];
@@ -160,10 +141,10 @@ fn parse_go_parameters(remainder: &str) -> GoParameters {
 /// Converts a Move to its UCI long algebraic notation string (e.g. "e2e4", "e7e8q").
 pub fn move_to_uci_string(chess_move: crate::board::Move) -> String {
     use crate::board::PieceType;
-    let from_file = (chess_move.from_square % 8) as u8 + b'a';
-    let from_rank = (chess_move.from_square / 8) as u8 + b'1';
-    let to_file   = (chess_move.to_square % 8) as u8 + b'a';
-    let to_rank   = (chess_move.to_square / 8) as u8 + b'1';
+    let from_file = (chess_move.from_square % 8) + b'a';
+    let from_rank = (chess_move.from_square / 8) + b'1';
+    let to_file   = (chess_move.to_square % 8) + b'a';
+    let to_rank   = (chess_move.to_square / 8) + b'1';
 
     let promotion_char = chess_move.promotion_piece.map(|piece| match piece {
         PieceType::Queen  => 'q',
@@ -194,10 +175,10 @@ pub fn parse_uci_move_string(move_string: &str, position: &crate::board::Positio
     use crate::board::{MoveFlags, PieceType};
 
     let bytes = move_string.as_bytes();
-    let from_file = (bytes[0] - b'a') as u8;
-    let from_rank = (bytes[1] - b'1') as u8;
-    let to_file   = (bytes[2] - b'a') as u8;
-    let to_rank   = (bytes[3] - b'1') as u8;
+    let from_file = bytes[0] - b'a';
+    let from_rank = bytes[1] - b'1';
+    let to_file   = bytes[2] - b'a';
+    let to_rank   = bytes[3] - b'1';
 
     let from_square = from_rank * 8 + from_file;
     let to_square   = to_rank * 8 + to_file;
@@ -225,10 +206,10 @@ pub fn parse_uci_move_string(move_string: &str, position: &crate::board::Positio
         && (to_square as i8 - from_square as i8).abs() == 2;
 
     let mut move_flags = MoveFlags::NONE;
-    if is_capture || is_en_passant { move_flags = move_flags | MoveFlags::CAPTURE; }
-    if is_en_passant               { move_flags = move_flags | MoveFlags::EN_PASSANT; }
-    if is_double_pawn_push         { move_flags = move_flags | MoveFlags::DOUBLE_PAWN_PUSH; }
-    if is_castling                 { move_flags = move_flags | MoveFlags::CASTLING; }
+    if is_capture || is_en_passant { move_flags |= MoveFlags::CAPTURE; }
+    if is_en_passant               { move_flags |= MoveFlags::EN_PASSANT; }
+    if is_double_pawn_push         { move_flags |= MoveFlags::DOUBLE_PAWN_PUSH; }
+    if is_castling                 { move_flags |= MoveFlags::CASTLING; }
 
     crate::board::Move {
         from_square,

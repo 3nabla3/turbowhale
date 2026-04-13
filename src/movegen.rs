@@ -1,7 +1,6 @@
 use std::sync::OnceLock;
 
 use crate::board::{Color, Move, MoveFlags, PieceType, Position};
-use tracing;
 
 // File masks: FILE_MASKS[0] = file A (squares 0,8,16,...,56)
 pub const FILE_MASKS: [u64; 8] = {
@@ -32,7 +31,7 @@ pub fn knight_attacks_for_square(square: usize) -> u64 {
     offsets.iter().fold(0u64, |attacks, &(rank_offset, file_offset)| {
         let target_rank = rank + rank_offset;
         let target_file = file + file_offset;
-        if target_rank >= 0 && target_rank < 8 && target_file >= 0 && target_file < 8 {
+        if (0..8).contains(&target_rank) && (0..8).contains(&target_file) {
             attacks | (1u64 << (target_rank as usize * 8 + target_file as usize))
         } else {
             attacks
@@ -51,7 +50,7 @@ pub fn king_attacks_for_square(square: usize) -> u64 {
     offsets.iter().fold(0u64, |attacks, &(rank_offset, file_offset)| {
         let target_rank = rank + rank_offset;
         let target_file = file + file_offset;
-        if target_rank >= 0 && target_rank < 8 && target_file >= 0 && target_file < 8 {
+        if (0..8).contains(&target_rank) && (0..8).contains(&target_file) {
             attacks | (1u64 << (target_rank as usize * 8 + target_file as usize))
         } else {
             attacks
@@ -89,7 +88,7 @@ fn get_diagonal_masks() -> &'static [u64; 64] {
             let file = (square % 8) as i32;
             (0..8i32).fold(0u64, |mask, target_rank| {
                 let target_file = file + (target_rank - rank);
-                if target_file >= 0 && target_file < 8 {
+                if (0..8).contains(&target_file) {
                     mask | (1u64 << (target_rank as usize * 8 + target_file as usize))
                 } else {
                     mask
@@ -106,7 +105,7 @@ fn get_anti_diagonal_masks() -> &'static [u64; 64] {
             let file = (square % 8) as i32;
             (0..8i32).fold(0u64, |mask, target_rank| {
                 let target_file = file - (target_rank - rank);
-                if target_file >= 0 && target_file < 8 {
+                if (0..8).contains(&target_file) {
                     mask | (1u64 << (target_rank as usize * 8 + target_file as usize))
                 } else {
                     mask
