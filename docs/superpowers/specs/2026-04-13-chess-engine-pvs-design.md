@@ -147,12 +147,17 @@ fn negamax_pvs(position, depth, alpha, beta, ply, context) -> i32:
      (beta - alpha > 1 guard: skip re-search when window is already null — CPW)
 
    After each move (fail-hard — check score against beta BEFORE updating alpha):
-     if score >= beta → store LowerBound in TT, return beta   ← fail-hard cutoff
-     if score > alpha: alpha = score
+     if score >= beta:
+         store TT entry: score=beta, flag=LowerBound, best_move=current_move, depth=depth
+         return beta   ← fail-hard cutoff
+     if score > alpha:
+         alpha = score
+         best_move = current_move   ← track for TT storage at step 8
 
-8. Store in TT:
-    - alpha improved over original_alpha → Exact
-    - alpha never improved → UpperBound
+8. Store in TT (only reached when no beta cutoff occurred):
+    - alpha improved over original_alpha → flag=Exact, score=alpha, best_move=best_move
+    - alpha never improved → flag=UpperBound, score=alpha, best_move=best_move (may be null/first move)
+    (LowerBound case is handled by the early return in step 7; never reached here)
 
 9. Return alpha
 ```
