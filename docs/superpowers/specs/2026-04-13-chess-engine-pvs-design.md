@@ -124,29 +124,31 @@ fn negamax_pvs(position, depth, alpha, beta, ply, context) -> i32:
 
 3. TT lookup — use score/move as described in Section 2
 
-4. If depth == 0 → return quiescence_search(position, alpha, beta, context)
-
-5. Generate legal moves
+4. Generate legal moves
    - If empty and in check  → return -MATE_SCORE + ply  (mated; + ply prefers faster mates)
    - If empty and not in check → return 0  (stalemate)
+   (Must happen before depth==0 check so checkmate/stalemate is detected correctly at leaf nodes)
+
+5. If depth == 0 → return quiescence_search(position, alpha, beta, context)
 
 6. Order moves:
    a. TT best move (if any) — first
-   b. Captures — ordered by MVV-LVA score (attacker value subtracted from victim value)
+   b. Captures — ordered by MVV-LVA score
    c. Quiet moves — unordered
 
 7. For each move (first move gets full window; rest get PVS):
    First move:
      score = -negamax_pvs(child, depth-1, -beta, -alpha, ply+1, context)
 
-   Remaining moves (PVS — null-window, re-search only if it raises alpha):
+   Remaining moves (PVS — null-window first, re-search only if it raises alpha):
      score = -negamax_pvs(child, depth-1, -alpha-1, -alpha, ply+1, context)
-     if score > alpha and score < beta:
+     if score > alpha and score < beta and beta - alpha > 1:
          score = -negamax_pvs(child, depth-1, -beta, -alpha, ply+1, context)
+     (beta - alpha > 1 guard: skip re-search when window is already null — CPW)
 
-   After each move:
-     alpha = max(alpha, score)
-     if alpha >= beta → store LowerBound in TT, return alpha  (beta cutoff)
+   After each move (fail-hard — check score against beta BEFORE updating alpha):
+     if score >= beta → store LowerBound in TT, return beta   ← fail-hard cutoff
+     if score > alpha: alpha = score
 
 8. Store in TT:
     - alpha improved over original_alpha → Exact
@@ -172,19 +174,27 @@ fn quiescence_search(position, alpha, beta, context) -> i32:
 
 1. Increment nodes_searched; check stop_flag on the same 1024-node cadence as negamax_pvs.
 
-2. Stand-pat: score = evaluate(position)
-   if score >= beta → return beta  (fail-high; opponent wouldn't allow this)
-   alpha = max(alpha, score)
+2. Check if side to move is in check (is_square_attacked on king square).
 
-3. Generate captures only (filter pseudo-legal moves to those with CAPTURE flag)
-   Order by MVV-LVA
+3. If NOT in check — stand-pat:
+     score = evaluate(position)
+     if score >= beta → return beta
+     if score > alpha: alpha = score
+   If IN CHECK — skip stand-pat entirely; must search all evasions.
+   (CPW: stand-pat is invalid when in check — the null-move assumption doesn't hold)
 
-4. For each capture:
+4. Generate moves:
+   - If NOT in check: generate captures only (CAPTURE flag), order by MVV-LVA
+   - If IN CHECK: generate all legal evasions (captures + quiet moves), order captures first
+
+5. For each move:
    score = -quiescence_search(child, -beta, -alpha, context)
    if score >= beta → return beta
-   alpha = max(alpha, score)
+   if score > alpha: alpha = score
 
-5. Return alpha
+6. If in check and no moves found → return -MATE_SCORE + ply  (checkmate in quiescence)
+
+7. Return alpha
 ```
 
 Quiescence search does not use the TT (adds complexity for marginal gain at this stage).
@@ -273,16 +283,30 @@ Incremental evaluation (maintaining a running score through `apply_move`) is a f
 Captures are ordered by Most Valuable Victim / Least Valuable Attacker:
 
 ```
-mvv_lva_score = victim_value - attacker_value / 10
+mvv_lva_score = victim_value * 10 - attacker_value
 ```
 
 Piece values for ordering (same as eval): P=100, N=320, B=330, R=500, Q=900.
 
-This ensures e.g. PxQ scores much higher than QxP, so winning captures are searched first, maximizing alpha-beta cutoffs.
+Multiplying victim by 10 ensures victim identity dominates — PxQ (9000-100=8900) scores far above QxQ (9000-900=8100), which scores far above QxP (1000-900=100). Winning captures are searched first, maximizing alpha-beta cutoffs.
+
+**Note on operator precedence:** the formula must be `(victim_value * 10) - attacker_value`, not `victim_value - (attacker_value / 10)`, which would produce incorrect ordering due to integer division.
 
 ---
 
-## 7. Out of Scope
+## 7. Performance Notes
+
+**Move list allocation:** use `Vec::with_capacity(48)` (typical max ~45 legal moves) to avoid reallocations in the hot path. Avoids heap churn in the deepest nodes where move generation happens most.
+
+**Branch prediction:** CPW confirms >90% of cut-nodes fail-high on the first move. This means the beta-cutoff branch in the move loop is almost always taken early — the CPU branch predictor will learn this quickly. The main implication is: **move ordering quality matters more than any micro-optimization**. Getting the TT best move first is the single most impactful thing.
+
+**TT probe cost:** the TT lookup involves one array index + one full hash comparison. Keep the `TtEntry` size small (fits in a cache line = 64 bytes) so lookups stay in L1/L2 cache. Our current entry is ~32 bytes — well within budget.
+
+**Avoid legal move generation at every node:** `generate_legal_moves` calls `apply_move` for every pseudo-legal move to filter check — expensive. For quiescence (captures-only), use `generate_pseudo_legal_moves` filtered to captures, then validate each with `apply_move` individually. For the main search, full legal generation is unavoidable but worth noting as a future optimization target (pin detection, check evasion generators).
+
+---
+
+## 8. Out of Scope
 
 The following are explicitly deferred:
 
