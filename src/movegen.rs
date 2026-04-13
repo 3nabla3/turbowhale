@@ -382,10 +382,14 @@ fn generate_pawn_moves(
             });
 
             // En passant
+            // The EP square is on rank 6 (the destination for the capturing white pawn).
+            // The capturing white pawn must be on rank 5, one file to the left or right.
+            // Shift EP square down by 9 (left-file, rank-1) or by 7 (right-file, rank-1)
+            // to find which white pawns can make the capture.
             if let Some(en_passant_square_index) = en_passant_square {
                 let en_passant_bit = 1u64 << en_passant_square_index;
-                let left_en_passant_attacker  = (en_passant_bit & !FILE_MASKS[0]) >> 1 & pawns;
-                let right_en_passant_attacker = (en_passant_bit & !FILE_MASKS[7]) << 1 & pawns;
+                let left_en_passant_attacker  = (en_passant_bit & !FILE_MASKS[0]) >> 9 & pawns;
+                let right_en_passant_attacker = (en_passant_bit & !FILE_MASKS[7]) >> 7 & pawns;
                 for_each_set_bit(left_en_passant_attacker | right_en_passant_attacker, |from_square| {
                     moves.push(Move {
                         from_square: from_square as u8,
@@ -480,10 +484,16 @@ fn generate_pawn_moves(
             });
 
             // En passant
+            // The EP square is on rank 3 (the destination for the capturing black pawn).
+            // The capturing black pawn must be on rank 4, one file to the left or right.
+            // Shift EP square up by 7 (left-file, rank+1) or by 9 (right-file, rank+1)
+            // to find which black pawns can make the capture.
+            // Mask out file-A EP squares before <<7 (left-file), and file-H before <<9 (right-file),
+            // to prevent wrapping across rank boundaries.
             if let Some(en_passant_square_index) = en_passant_square {
                 let en_passant_bit = 1u64 << en_passant_square_index;
-                let left_en_passant_attacker  = (en_passant_bit & !FILE_MASKS[7]) << 1 & pawns;
-                let right_en_passant_attacker = (en_passant_bit & !FILE_MASKS[0]) >> 1 & pawns;
+                let left_en_passant_attacker  = (en_passant_bit & !FILE_MASKS[0]) << 7 & pawns;
+                let right_en_passant_attacker = (en_passant_bit & !FILE_MASKS[7]) << 9 & pawns;
                 for_each_set_bit(left_en_passant_attacker | right_en_passant_attacker, |from_square| {
                     moves.push(Move {
                         from_square: from_square as u8,

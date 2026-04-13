@@ -2,6 +2,7 @@ mod board;
 mod engine;
 mod eval;
 mod movegen;
+mod perft;
 mod telemetry;
 mod tt;
 mod uci;
