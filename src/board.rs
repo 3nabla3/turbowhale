@@ -1,4 +1,4 @@
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Color {
     White,
     Black,
@@ -13,7 +13,7 @@ impl Color {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PieceType {
     Pawn,
     Knight,
@@ -23,7 +23,7 @@ pub enum PieceType {
     King,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub struct MoveFlags(u8);
 
 impl MoveFlags {
@@ -36,6 +36,10 @@ impl MoveFlags {
     pub fn contains(self, other: MoveFlags) -> bool {
         (self.0 & other.0) == other.0
     }
+
+    pub fn is_empty(self) -> bool {
+        self.0 == 0
+    }
 }
 
 impl std::ops::BitOr for MoveFlags {
@@ -45,10 +49,18 @@ impl std::ops::BitOr for MoveFlags {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+impl std::ops::BitOrAssign for MoveFlags {
+    fn bitor_assign(&mut self, other: Self) {
+        self.0 |= other.0;
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Move {
     pub from_square: u8,
     pub to_square: u8,
+    /// Invariant: if Some, the piece type must be Knight, Bishop, Rook, or Queen.
+    /// Pawn and King are not valid promotion targets.
     pub promotion_piece: Option<PieceType>,
     pub move_flags: MoveFlags,
 }
