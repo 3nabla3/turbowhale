@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -397,7 +398,6 @@ fn order_moves(mut moves: Vec<Move>, position: &Position, tt_best_move: Option<M
 }
 
 fn extract_pv_from_tt(root: &Position, tt: &TranspositionTable, max_depth: u32) -> Vec<Move> {
-    use std::collections::HashSet;
     let mut pv = Vec::new();
     let mut current_position = root.clone();
     let mut visited_hashes: HashSet<u64> = HashSet::new();
@@ -409,11 +409,15 @@ fn extract_pv_from_tt(root: &Position, tt: &TranspositionTable, max_depth: u32) 
         }
         visited_hashes.insert(hash);
         match tt.probe(hash) {
-            Some(entry) => {
+            Some(entry) if entry.node_type == NodeType::Exact => {
+                let legal_moves = generate_legal_moves(&current_position);
+                if !legal_moves.contains(&entry.best_move) {
+                    break;
+                }
                 pv.push(entry.best_move);
                 current_position = crate::board::apply_move(&current_position, entry.best_move);
             }
-            None => break,
+            _ => break,
         }
     }
 
