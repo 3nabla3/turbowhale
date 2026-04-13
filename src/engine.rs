@@ -84,10 +84,14 @@ pub fn select_move(
             };
 
             let pv = extract_pv_from_tt(position, context.transposition_table, depth);
-            let pv_string = pv.iter()
-                .map(|&chess_move| move_to_uci_string(chess_move))
-                .collect::<Vec<_>>()
-                .join(" ");
+            let pv_string = if pv.is_empty() {
+                move_to_uci_string(best_move)
+            } else {
+                pv.iter()
+                    .map(|&chess_move| move_to_uci_string(chess_move))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            };
 
             println!("info depth {} score {} nodes {} nps {} time {} pv {}",
                 depth,
