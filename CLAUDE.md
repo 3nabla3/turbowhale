@@ -10,6 +10,14 @@ NEVER abbreviate variable names or function names. Always use full, descriptive 
 
 Always use the `/gitbutler` skill for git write operations (commits, branches, pushes). Never commit directly to `master` — use feature branches.
 
+NEVER use git worktrees. GitButler allows multiple branches to be checked out simultaneously, so use that instead.
+
+When working on multiple concerns at once, keep them on separate branches:
+- Two features → two feature branches
+- A feature plus an unrelated bug fix → a feature branch and a separate bug fix branch
+
+Always ensure each commit lands on the correct branch. If you are not sure which branch to commit to, ask — do not guess.
+
 ## Build and Test Commands
 
 ```bash
