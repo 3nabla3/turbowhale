@@ -313,6 +313,92 @@ fn evaluate_pawn_structure_for_color(position: &Position, color: Color) -> i32 {
     score
 }
 
+// ---------------------------------------------------------------------------
+// Mobility bonuses (centipawns per reachable square, by piece type).
+// ---------------------------------------------------------------------------
+
+const KNIGHT_MOBILITY_MIDDLEGAME_BONUS: i32 = 4;
+const KNIGHT_MOBILITY_ENDGAME_BONUS: i32 = 2;
+const BISHOP_MOBILITY_MIDDLEGAME_BONUS: i32 = 3;
+const BISHOP_MOBILITY_ENDGAME_BONUS: i32 = 3;
+const ROOK_MOBILITY_MIDDLEGAME_BONUS: i32 = 2;
+const ROOK_MOBILITY_ENDGAME_BONUS: i32 = 4;
+const QUEEN_MOBILITY_MIDDLEGAME_BONUS: i32 = 1;
+const QUEEN_MOBILITY_ENDGAME_BONUS: i32 = 2;
+
+/// Returns (middlegame_bonus, endgame_bonus) in centipawns from White's perspective:
+/// positive values favour White, negative values favour Black.
+fn evaluate_mobility(position: &Position) -> (i32, i32) {
+    let (white_mg, white_eg) = mobility_for_color(position, Color::White);
+    let (black_mg, black_eg) = mobility_for_color(position, Color::Black);
+    (white_mg - black_mg, white_eg - black_eg)
+}
+
+/// Returns (middlegame_bonus, endgame_bonus) for one side.
+/// Counts reachable squares for each non-pawn, non-king piece (squares not
+/// occupied by a friendly piece), using the precomputed attack tables.
+fn mobility_for_color(position: &Position, color: Color) -> (i32, i32) {
+    use crate::movegen::{bishop_attacks, knight_attacks_for_square, queen_attacks, rook_attacks};
+
+    let (own_occupancy, knights, bishops, rooks, queens) = match color {
+        Color::White => (
+            position.white_occupancy,
+            position.white_knights,
+            position.white_bishops,
+            position.white_rooks,
+            position.white_queens,
+        ),
+        Color::Black => (
+            position.black_occupancy,
+            position.black_knights,
+            position.black_bishops,
+            position.black_rooks,
+            position.black_queens,
+        ),
+    };
+
+    let mut middlegame_bonus = 0i32;
+    let mut endgame_bonus = 0i32;
+
+    let mut knight_bits = knights;
+    while knight_bits != 0 {
+        let square = knight_bits.trailing_zeros() as usize;
+        knight_bits &= knight_bits - 1;
+        let reachable_squares = (knight_attacks_for_square(square) & !own_occupancy).count_ones() as i32;
+        middlegame_bonus += reachable_squares * KNIGHT_MOBILITY_MIDDLEGAME_BONUS;
+        endgame_bonus    += reachable_squares * KNIGHT_MOBILITY_ENDGAME_BONUS;
+    }
+
+    let mut bishop_bits = bishops;
+    while bishop_bits != 0 {
+        let square = bishop_bits.trailing_zeros() as usize;
+        bishop_bits &= bishop_bits - 1;
+        let reachable_squares = (bishop_attacks(square, position.all_occupancy) & !own_occupancy).count_ones() as i32;
+        middlegame_bonus += reachable_squares * BISHOP_MOBILITY_MIDDLEGAME_BONUS;
+        endgame_bonus    += reachable_squares * BISHOP_MOBILITY_ENDGAME_BONUS;
+    }
+
+    let mut rook_bits = rooks;
+    while rook_bits != 0 {
+        let square = rook_bits.trailing_zeros() as usize;
+        rook_bits &= rook_bits - 1;
+        let reachable_squares = (rook_attacks(square, position.all_occupancy) & !own_occupancy).count_ones() as i32;
+        middlegame_bonus += reachable_squares * ROOK_MOBILITY_MIDDLEGAME_BONUS;
+        endgame_bonus    += reachable_squares * ROOK_MOBILITY_ENDGAME_BONUS;
+    }
+
+    let mut queen_bits = queens;
+    while queen_bits != 0 {
+        let square = queen_bits.trailing_zeros() as usize;
+        queen_bits &= queen_bits - 1;
+        let reachable_squares = (queen_attacks(square, position.all_occupancy) & !own_occupancy).count_ones() as i32;
+        middlegame_bonus += reachable_squares * QUEEN_MOBILITY_MIDDLEGAME_BONUS;
+        endgame_bonus    += reachable_squares * QUEEN_MOBILITY_ENDGAME_BONUS;
+    }
+
+    (middlegame_bonus, endgame_bonus)
+}
+
 /// Threshold (centipawns) above which the cheap tapered PST score is returned
 /// without computing pawn structure, mobility, or king safety.
 const LAZY_EVALUATION_THRESHOLD: i32 = 500;
@@ -359,6 +445,24 @@ mod tests {
                 > MIDDLEGAME_PIECE_SQUARE_TABLES[PieceType::Knight as usize][0],
             "knight on d4 should have higher middlegame bonus than knight on a1"
         );
+    }
+
+    #[test]
+    fn mobility_is_symmetric_at_start_position() {
+        let position = start_position();
+        let (white_middlegame, white_endgame) = mobility_for_color(&position, Color::White);
+        let (black_middlegame, black_endgame) = mobility_for_color(&position, Color::Black);
+        assert_eq!(white_middlegame, black_middlegame, "start position middlegame mobility should be equal");
+        assert_eq!(white_endgame,    black_endgame,    "start position endgame mobility should be equal");
+    }
+
+    #[test]
+    fn knight_on_d4_has_more_mobility_than_knight_on_a1() {
+        let knight_on_d4 = from_fen("4k3/8/8/8/3N4/8/8/4K3 w - - 0 1");
+        let knight_on_a1 = from_fen("4k3/8/8/8/8/8/8/N3K3 w - - 0 1");
+        let (d4_mg, _) = mobility_for_color(&knight_on_d4, Color::White);
+        let (a1_mg, _) = mobility_for_color(&knight_on_a1, Color::White);
+        assert!(d4_mg > a1_mg, "knight on d4 should have higher mobility than knight on a1");
     }
 
     #[test]
