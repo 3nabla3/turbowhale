@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Naming
+
+NEVER abbreviate variable names or function names. Always use full, descriptive names. Code is read far more than it is written.
+
 ## Git Workflow
 
 Always use the `/gitbutler` skill for git write operations (commits, branches, pushes). Never commit directly to `master` — use feature branches.
