@@ -952,7 +952,7 @@ mod tests {
     #[test]
     fn ponderhit_is_accepted_silently() {
         let response = run_and_capture(b"ponderhit\nquit\n");
-        assert!(response.contains("bestmove") == false && response.is_empty(),
+        assert!(response.is_empty(),
             "ponderhit must produce no output, got: {}", response);
     }
 
