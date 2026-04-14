@@ -2,6 +2,9 @@
 name = "turbowhale"
 version = "0.1.0"
 edition = "2024"
+description = "A UCI chess engine"
+license = "MIT"
+repository = "https://github.com/3nabla3/turbowhale"
 
 [dependencies]
 rand = "0.10"
