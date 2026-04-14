@@ -181,6 +181,138 @@ pub const ENDGAME_PIECE_SQUARE_TABLES: [[i32; 64]; 6] = [
     ],
 ];
 
+// ---------------------------------------------------------------------------
+// Pawn structure penalties and bonuses (centipawns).
+// ---------------------------------------------------------------------------
+
+const DOUBLED_PAWN_PENALTY: i32 = 10;
+const ISOLATED_PAWN_PENALTY: i32 = 15;
+/// Bonus per passed pawn indexed by rank (rank 0 unused; rank 7 = promotion rank).
+const PASSED_PAWN_RANK_BONUS: [i32; 8] = [0, 0, 10, 20, 35, 55, 80, 110];
+
+// ---------------------------------------------------------------------------
+// Precomputed bitboard masks for pawn structure evaluation.
+// ---------------------------------------------------------------------------
+
+/// One bit per square on each of the 8 files. FILE_MASKS[0] = a-file.
+const FILE_MASKS: [u64; 8] = [
+    0x0101010101010101, // a-file
+    0x0202020202020202, // b-file
+    0x0404040404040404, // c-file
+    0x0808080808080808, // d-file
+    0x1010101010101010, // e-file
+    0x2020202020202020, // f-file
+    0x4040404040404040, // g-file
+    0x8080808080808080, // h-file
+];
+
+/// For each file, the mask of all squares on adjacent files.
+/// ADJACENT_FILE_MASKS[0] = b-file only; ADJACENT_FILE_MASKS[7] = g-file only.
+const ADJACENT_FILE_MASKS: [u64; 8] = [
+    0x0202020202020202, // a: only b-file
+    0x0505050505050505, // b: a + c
+    0x0a0a0a0a0a0a0a0a, // c: b + d
+    0x1414141414141414, // d: c + e
+    0x2828282828282828, // e: d + f
+    0x5050505050505050, // f: e + g
+    0xa0a0a0a0a0a0a0a0, // g: f + h
+    0x4040404040404040, // h: only g-file
+];
+
+use std::sync::LazyLock;
+
+/// For each square, all squares on the same and adjacent files with strictly higher rank.
+/// Used to determine if a White pawn is passed (no Black pawn in this mask).
+static WHITE_FORWARD_SPAN_MASKS: LazyLock<[u64; 64]> = LazyLock::new(|| {
+    let mut masks = [0u64; 64];
+    for square in 0..64usize {
+        let file = square % 8;
+        let rank = square / 8;
+        let forward_ranks: u64 = if rank < 7 {
+            0xFFFFFFFFFFFFFFFF << ((rank + 1) * 8)
+        } else {
+            0
+        };
+        let file_and_adjacent = FILE_MASKS[file] | ADJACENT_FILE_MASKS[file];
+        masks[square] = forward_ranks & file_and_adjacent;
+    }
+    masks
+});
+
+/// For each square, all squares on the same and adjacent files with strictly lower rank.
+/// Used to determine if a Black pawn is passed (no White pawn in this mask).
+static BLACK_FORWARD_SPAN_MASKS: LazyLock<[u64; 64]> = LazyLock::new(|| {
+    let mut masks = [0u64; 64];
+    for square in 0..64usize {
+        let file = square % 8;
+        let rank = square / 8;
+        let backward_ranks: u64 = if rank > 0 {
+            0xFFFFFFFFFFFFFFFF >> ((8 - rank) * 8)
+        } else {
+            0
+        };
+        let file_and_adjacent = FILE_MASKS[file] | ADJACENT_FILE_MASKS[file];
+        masks[square] = backward_ranks & file_and_adjacent;
+    }
+    masks
+});
+
+/// Returns a score in centipawns from White's perspective:
+/// positive values favour White, negative values favour Black.
+///
+/// Evaluates three pawn structure features for both sides and returns
+/// white_score - black_score.
+fn evaluate_pawn_structure(position: &Position) -> i32 {
+    evaluate_pawn_structure_for_color(position, Color::White)
+        - evaluate_pawn_structure_for_color(position, Color::Black)
+}
+
+/// Returns the pawn structure score for one side (always positive = good for that side).
+fn evaluate_pawn_structure_for_color(position: &Position, color: Color) -> i32 {
+    let (own_pawns, enemy_pawns) = match color {
+        Color::White => (position.white_pawns, position.black_pawns),
+        Color::Black => (position.black_pawns, position.white_pawns),
+    };
+
+    let mut score = 0i32;
+    let mut pawns_remaining = own_pawns;
+
+    while pawns_remaining != 0 {
+        let square = pawns_remaining.trailing_zeros() as usize;
+        pawns_remaining &= pawns_remaining - 1;
+
+        let file = square % 8;
+        let rank = square / 8;
+
+        // Doubled pawn penalty: penalise each extra pawn beyond the first on this file
+        let pawns_on_file = (own_pawns & FILE_MASKS[file]).count_ones() as i32;
+        if pawns_on_file > 1 {
+            score -= DOUBLED_PAWN_PENALTY;
+        }
+
+        // Isolated pawn penalty: penalise if no friendly pawn on adjacent files
+        if own_pawns & ADJACENT_FILE_MASKS[file] == 0 {
+            score -= ISOLATED_PAWN_PENALTY;
+        }
+
+        // Passed pawn bonus: bonus if no enemy pawn can block or capture this pawn
+        let forward_span = match color {
+            Color::White => WHITE_FORWARD_SPAN_MASKS[square],
+            Color::Black => BLACK_FORWARD_SPAN_MASKS[square],
+        };
+        if forward_span & enemy_pawns == 0 {
+            // Bonus scaled by how advanced the pawn is (rank 1–6 for White, mirrored for Black)
+            let advancement_rank = match color {
+                Color::White => rank,
+                Color::Black => 7 - rank,
+            };
+            score += PASSED_PAWN_RANK_BONUS[advancement_rank];
+        }
+    }
+
+    score
+}
+
 /// Threshold (centipawns) above which the cheap tapered PST score is returned
 /// without computing pawn structure, mobility, or king safety.
 const LAZY_EVALUATION_THRESHOLD: i32 = 500;
@@ -227,6 +359,46 @@ mod tests {
                 > MIDDLEGAME_PIECE_SQUARE_TABLES[PieceType::Knight as usize][0],
             "knight on d4 should have higher middlegame bonus than knight on a1"
         );
+    }
+
+    #[test]
+    fn doubled_pawn_scores_worse_than_single_pawn() {
+        // Two white pawns on the e-file vs one white pawn on e-file
+        let doubled = from_fen("4k3/8/8/8/4P3/4P3/8/4K3 w - - 0 1");
+        let single  = from_fen("4k3/8/8/8/4P3/8/8/4K3 w - - 0 1");
+        // Doubled pawns should receive a penalty relative to single
+        assert!(
+            evaluate_pawn_structure(&doubled) < evaluate_pawn_structure(&single),
+            "doubled pawns should score worse than a single pawn"
+        );
+    }
+
+    #[test]
+    fn isolated_pawn_scores_worse_than_connected_pawn() {
+        // White pawn on e4, no adjacent file pawns (isolated)
+        let isolated  = from_fen("4k3/8/8/8/4P3/8/8/4K3 w - - 0 1");
+        // White pawns on d4 and e4 (e4 is connected, d4 is connected)
+        let connected = from_fen("4k3/8/8/8/3PP3/8/8/4K3 w - - 0 1");
+        assert!(
+            evaluate_pawn_structure(&isolated) < evaluate_pawn_structure(&connected),
+            "isolated pawn should score worse than connected pawns"
+        );
+    }
+
+    #[test]
+    fn passed_pawn_on_rank_7_scores_better_than_rank_3() {
+        let rank_7 = from_fen("4k3/4P3/8/8/8/8/8/4K3 w - - 0 1");
+        let rank_3 = from_fen("4k3/8/8/8/8/4P3/8/4K3 w - - 0 1");
+        assert!(
+            evaluate_pawn_structure(&rank_7) > evaluate_pawn_structure(&rank_3),
+            "passed pawn on rank 7 should score higher than passed pawn on rank 3"
+        );
+    }
+
+    #[test]
+    fn pawn_structure_is_symmetric_at_start_position() {
+        let position = start_position();
+        assert_eq!(evaluate_pawn_structure(&position), 0);
     }
 
     #[test]
