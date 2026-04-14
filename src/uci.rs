@@ -303,7 +303,7 @@ fn handle_uci_line(
                 for (chess_move, count) in divide {
                     writeln!(output, "{}: {}", move_to_uci_string(chess_move), count).unwrap();
                 }
-                writeln!(output, "").unwrap();
+                writeln!(output).unwrap();
                 writeln!(output, "Nodes searched: {}", total).unwrap();
                 output.flush().unwrap();
                 return LineOutcome::Continue;
