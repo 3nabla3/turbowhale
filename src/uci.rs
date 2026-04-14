@@ -264,8 +264,8 @@ fn handle_uci_line(
 
     match command {
         UciCommand::Uci => {
-            writeln!(output, "id name turbowhale").unwrap();
-            writeln!(output, "id author 3nabla3").unwrap();
+            writeln!(output, "id name {} v{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")).unwrap();
+            writeln!(output, "id author {}", env!("CARGO_PKG_AUTHORS")).unwrap();
             writeln!(output, "uciok").unwrap();
             output.flush().unwrap();
         }
