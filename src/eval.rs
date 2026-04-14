@@ -399,6 +399,85 @@ fn mobility_for_color(position: &Position, color: Color) -> (i32, i32) {
     (middlegame_bonus, endgame_bonus)
 }
 
+// ---------------------------------------------------------------------------
+// King safety penalties (centipawns). Applied to the middlegame score only,
+// scaled by game_phase so they fade toward zero in the endgame.
+// ---------------------------------------------------------------------------
+
+const PAWN_SHIELD_PENALTY: i32 = 15;
+const KING_OPEN_FILE_PENALTY: i32 = 25;
+const KING_SEMI_OPEN_FILE_PENALTY: i32 = 10;
+
+/// For each king square, the pawn shield zone (3 squares directly in front
+/// and 3 squares one rank further), for White.
+/// For Black, use KING_SHIELD_MASKS[square ^ 56].
+static KING_SHIELD_MASKS: LazyLock<[u64; 64]> = LazyLock::new(|| {
+    let mut masks = [0u64; 64];
+    for square in 0..64usize {
+        let file = square % 8;
+        let rank = square / 8;
+        // Files covered: king file plus adjacent files
+        let covered_files = FILE_MASKS[file] | ADJACENT_FILE_MASKS[file];
+        // Two ranks immediately in front of the king (from White's perspective)
+        let rank1_mask: u64 = if rank + 1 <= 7 { 0xFFu64 << ((rank + 1) * 8) } else { 0 };
+        let rank2_mask: u64 = if rank + 2 <= 7 { 0xFFu64 << ((rank + 2) * 8) } else { 0 };
+        masks[square] = covered_files & (rank1_mask | rank2_mask);
+    }
+    masks
+});
+
+/// Returns a score in centipawns from White's perspective:
+/// positive values favour White, negative values favour Black.
+/// King safety is a middlegame concern only; the caller scales by game_phase.
+fn evaluate_king_safety(position: &Position) -> i32 {
+    evaluate_king_safety_for_color(position, Color::White)
+        - evaluate_king_safety_for_color(position, Color::Black)
+}
+
+/// Returns the king safety score for one side (positive = good for that side).
+fn evaluate_king_safety_for_color(position: &Position, color: Color) -> i32 {
+    let (own_pawns, enemy_pawns, king_bitboard) = match color {
+        Color::White => (position.white_pawns, position.black_pawns, position.white_king),
+        Color::Black => (position.black_pawns, position.white_pawns, position.black_king),
+    };
+
+    let king_square = king_bitboard.trailing_zeros() as usize;
+    // For Black, mirror the king square to use White's perspective shield mask
+    let shield_lookup_square = match color {
+        Color::White => king_square,
+        Color::Black => king_square ^ 56,
+    };
+
+    // KING_SHIELD_MASKS stores upward-facing zones in White's coordinate system.
+    // For Black, mirror the resulting mask vertically (swap_bytes reverses rank order).
+    let shield_zone = match color {
+        Color::White => KING_SHIELD_MASKS[shield_lookup_square],
+        Color::Black => KING_SHIELD_MASKS[shield_lookup_square].swap_bytes(),
+    };
+    let shield_pawns_present = (own_pawns & shield_zone).count_ones() as i32;
+    let shield_pawns_possible = shield_zone.count_ones() as i32;
+    let missing_shield_pawns = (shield_pawns_possible - shield_pawns_present).max(0);
+
+    let mut score = -(missing_shield_pawns * PAWN_SHIELD_PENALTY);
+
+    // Open and semi-open file penalties for the king file and adjacent files
+    let king_file = king_square % 8;
+    let minimum_file = king_file.saturating_sub(1);
+    let maximum_file = (king_file + 1).min(7);
+    for file in minimum_file..=maximum_file {
+        let file_mask = FILE_MASKS[file];
+        if own_pawns & file_mask == 0 {
+            if enemy_pawns & file_mask == 0 {
+                score -= KING_OPEN_FILE_PENALTY;
+            } else {
+                score -= KING_SEMI_OPEN_FILE_PENALTY;
+            }
+        }
+    }
+
+    score
+}
+
 /// Threshold (centipawns) above which the cheap tapered PST score is returned
 /// without computing pawn structure, mobility, or king safety.
 const LAZY_EVALUATION_THRESHOLD: i32 = 500;
@@ -444,6 +523,36 @@ mod tests {
             MIDDLEGAME_PIECE_SQUARE_TABLES[PieceType::Knight as usize][27]
                 > MIDDLEGAME_PIECE_SQUARE_TABLES[PieceType::Knight as usize][0],
             "knight on d4 should have higher middlegame bonus than knight on a1"
+        );
+    }
+
+    #[test]
+    fn king_safety_is_symmetric_at_start_position() {
+        let position = start_position();
+        assert_eq!(evaluate_king_safety(&position), 0);
+    }
+
+    #[test]
+    fn castled_king_with_intact_pawn_shield_scores_better_than_broken_shield() {
+        // White king castled kingside, full pawn shield
+        let intact_shield = from_fen("4k3/8/8/8/8/8/5PPP/5RK1 w - - 0 1");
+        // White king castled kingside, pawn on f2 missing (broken shield)
+        let broken_shield = from_fen("4k3/8/8/8/8/8/6PP/5RK1 w - - 0 1");
+        assert!(
+            evaluate_king_safety(&intact_shield) > evaluate_king_safety(&broken_shield),
+            "intact pawn shield should score better than broken shield"
+        );
+    }
+
+    #[test]
+    fn king_on_open_file_scores_worse_than_king_on_closed_file() {
+        // White king on e1, open e-file (no pawns on e-file)
+        let open_file_king   = from_fen("4k3/8/8/8/8/8/3P1PPP/3P1K2 w - - 0 1");
+        // White king on g1, g-file closed (pawn on g2)
+        let closed_file_king = from_fen("4k3/8/8/8/8/8/3PPPPP/3P2K1 w - - 0 1");
+        assert!(
+            evaluate_king_safety(&open_file_king) < evaluate_king_safety(&closed_file_king),
+            "king on open file should score worse than king on closed file"
         );
     }
 
