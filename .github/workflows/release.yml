@@ -79,6 +79,10 @@ jobs:
           cp "$BINARY_SRC" "$DST"
           echo "ARTIFACT_FILE=$DST" >> "$GITHUB_ENV"
 
+      - name: Sign macOS binary (ad-hoc)
+        if: matrix.runner == 'macos-latest'
+        run: codesign --force --sign - "${{ env.ARTIFACT_FILE }}"
+
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
