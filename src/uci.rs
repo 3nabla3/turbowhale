@@ -7,6 +7,7 @@ use tracing::instrument;
 use crate::board::{apply_move, from_fen, start_position, Position};
 use crate::engine::select_move;
 use crate::movegen::generate_legal_moves;
+use crate::perft::perft_divide;
 use crate::tt::TranspositionTable;
 
 const START_POSITION_FEN: &str =
@@ -296,6 +297,18 @@ fn handle_uci_line(
         }
 
         UciCommand::Go(parameters) => {
+            if let Some(depth) = parameters.perft_depth {
+                let divide = perft_divide(&state.current_position, depth);
+                let total: u64 = divide.iter().map(|(_, count)| count).sum();
+                for (chess_move, count) in divide {
+                    writeln!(output, "{}: {}", move_to_uci_string(chess_move), count).unwrap();
+                }
+                writeln!(output, "").unwrap();
+                writeln!(output, "Nodes searched: {}", total).unwrap();
+                output.flush().unwrap();
+                return LineOutcome::Continue;
+            }
+
             state.stop_search();
             state.stop_flag.store(false, Ordering::Relaxed);
 
@@ -475,5 +488,26 @@ mod tests {
             }
             _ => panic!("Expected Go command"),
         }
+    }
+
+    #[test]
+    fn go_perft_depth_1_prints_divide_and_total() {
+        let input = b"position startpos\ngo perft 1\nquit\n";
+        let mut output = Vec::new();
+        run_uci_loop(std::io::BufReader::new(input.as_ref()), &mut output);
+        let response = String::from_utf8(output).unwrap();
+        // 20 move lines + blank line + total line
+        assert!(response.contains("Nodes searched: 20"), "got: {}", response);
+        // sanity check one known move is present
+        assert!(response.contains("e2e4:"), "got: {}", response);
+    }
+
+    #[test]
+    fn go_perft_depth_2_prints_correct_total() {
+        let input = b"position startpos\ngo perft 2\nquit\n";
+        let mut output = Vec::new();
+        run_uci_loop(std::io::BufReader::new(input.as_ref()), &mut output);
+        let response = String::from_utf8(output).unwrap();
+        assert!(response.contains("Nodes searched: 400"), "got: {}", response);
     }
 }
