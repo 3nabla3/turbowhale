@@ -1,0 +1,105 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+jobs:
+  build:
+    name: Build ${{ matrix.artifact_suffix }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            binary_name: turbowhale
+            artifact_suffix: x86_64-linux
+            use_cross: false
+
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-latest
+            binary_name: turbowhale
+            artifact_suffix: aarch64-linux
+            use_cross: true
+
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+            binary_name: turbowhale
+            artifact_suffix: aarch64-macos
+            use_cross: false
+
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            binary_name: turbowhale.exe
+            artifact_suffix: x86_64-windows
+            use_cross: false
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain and target
+        run: rustup show && rustup target add ${{ matrix.target }}
+
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - uses: taiki-e/install-action@v2
+        if: ${{ matrix.use_cross }}
+        with:
+          tool: cross
+
+      - name: Build with cross
+        if: ${{ matrix.use_cross }}
+        run: cross build --release --target ${{ matrix.target }}
+
+      - name: Build natively
+        if: ${{ !matrix.use_cross }}
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Rename binary for release
+        shell: bash
+        env:
+          TAG: ${{ github.ref_name }}
+          BINARY_SRC: target/${{ matrix.target }}/release/${{ matrix.binary_name }}
+          ARTIFACT_SUFFIX: ${{ matrix.artifact_suffix }}
+        run: |
+          if [[ "$ARTIFACT_SUFFIX" == "x86_64-windows" ]]; then
+            DST="turbowhale-${TAG}-${ARTIFACT_SUFFIX}.exe"
+          else
+            DST="turbowhale-${TAG}-${ARTIFACT_SUFFIX}"
+          fi
+          cp "$BINARY_SRC" "$DST"
+          echo "ARTIFACT_FILE=$DST" >> "$GITHUB_ENV"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.artifact_suffix }}
+          path: ${{ env.ARTIFACT_FILE }}
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: artifacts/*
+          generate_release_notes: true
