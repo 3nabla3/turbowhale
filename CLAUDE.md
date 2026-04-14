@@ -16,7 +16,7 @@ When working on multiple concerns at once, keep them on separate branches:
 - Two features → two feature branches
 - A feature plus an unrelated bug fix → a feature branch and a separate bug fix branch
 
-Always ensure each commit lands on the correct branch.
+Always ensure each commit lands on the correct branch. If you are not sure which branch to commit to, ask — do not guess.
 
 ## Build and Test Commands
 
