@@ -1,4 +1,4 @@
-use crate::board::{Color, PieceType, Position};
+use crate::board::{Color, Position};
 
 // ---------------------------------------------------------------------------
 // Material values (centipawns) — separate from positional bonuses.
@@ -225,7 +225,7 @@ use std::sync::LazyLock;
 /// Used to determine if a White pawn is passed (no Black pawn in this mask).
 static WHITE_FORWARD_SPAN_MASKS: LazyLock<[u64; 64]> = LazyLock::new(|| {
     let mut masks = [0u64; 64];
-    for square in 0..64usize {
+    for (square, mask) in masks.iter_mut().enumerate() {
         let file = square % 8;
         let rank = square / 8;
         let forward_ranks: u64 = if rank < 7 {
@@ -234,7 +234,7 @@ static WHITE_FORWARD_SPAN_MASKS: LazyLock<[u64; 64]> = LazyLock::new(|| {
             0
         };
         let file_and_adjacent = FILE_MASKS[file] | ADJACENT_FILE_MASKS[file];
-        masks[square] = forward_ranks & file_and_adjacent;
+        *mask = forward_ranks & file_and_adjacent;
     }
     masks
 });
@@ -243,7 +243,7 @@ static WHITE_FORWARD_SPAN_MASKS: LazyLock<[u64; 64]> = LazyLock::new(|| {
 /// Used to determine if a Black pawn is passed (no White pawn in this mask).
 static BLACK_FORWARD_SPAN_MASKS: LazyLock<[u64; 64]> = LazyLock::new(|| {
     let mut masks = [0u64; 64];
-    for square in 0..64usize {
+    for (square, mask) in masks.iter_mut().enumerate() {
         let file = square % 8;
         let rank = square / 8;
         let backward_ranks: u64 = if rank > 0 {
@@ -252,7 +252,7 @@ static BLACK_FORWARD_SPAN_MASKS: LazyLock<[u64; 64]> = LazyLock::new(|| {
             0
         };
         let file_and_adjacent = FILE_MASKS[file] | ADJACENT_FILE_MASKS[file];
-        masks[square] = backward_ranks & file_and_adjacent;
+        *mask = backward_ranks & file_and_adjacent;
     }
     masks
 });
@@ -413,15 +413,15 @@ const KING_SEMI_OPEN_FILE_PENALTY: i32 = 10;
 /// For Black, use KING_SHIELD_MASKS[square ^ 56].
 static KING_SHIELD_MASKS: LazyLock<[u64; 64]> = LazyLock::new(|| {
     let mut masks = [0u64; 64];
-    for square in 0..64usize {
+    for (square, mask) in masks.iter_mut().enumerate() {
         let file = square % 8;
         let rank = square / 8;
         // Files covered: king file plus adjacent files
         let covered_files = FILE_MASKS[file] | ADJACENT_FILE_MASKS[file];
         // Two ranks immediately in front of the king (from White's perspective)
-        let rank1_mask: u64 = if rank + 1 <= 7 { 0xFFu64 << ((rank + 1) * 8) } else { 0 };
+        let rank1_mask: u64 = if rank < 7 { 0xFFu64 << ((rank + 1) * 8) } else { 0 };
         let rank2_mask: u64 = if rank + 2 <= 7 { 0xFFu64 << ((rank + 2) * 8) } else { 0 };
-        masks[square] = covered_files & (rank1_mask | rank2_mask);
+        *mask = covered_files & (rank1_mask | rank2_mask);
     }
     masks
 });
@@ -440,6 +440,10 @@ fn evaluate_king_safety_for_color(position: &Position, color: Color) -> i32 {
         Color::White => (position.white_pawns, position.black_pawns, position.white_king),
         Color::Black => (position.black_pawns, position.white_pawns, position.black_king),
     };
+
+    if king_bitboard == 0 {
+        return 0;
+    }
 
     let king_square = king_bitboard.trailing_zeros() as usize;
     // For Black, mirror the king square to use White's perspective shield mask
@@ -464,8 +468,7 @@ fn evaluate_king_safety_for_color(position: &Position, color: Color) -> i32 {
     let king_file = king_square % 8;
     let minimum_file = king_file.saturating_sub(1);
     let maximum_file = (king_file + 1).min(7);
-    for file in minimum_file..=maximum_file {
-        let file_mask = FILE_MASKS[file];
+    for &file_mask in FILE_MASKS[minimum_file..=maximum_file].iter() {
         if own_pawns & file_mask == 0 {
             if enemy_pawns & file_mask == 0 {
                 score -= KING_OPEN_FILE_PENALTY;
@@ -487,7 +490,7 @@ const LAZY_EVALUATION_THRESHOLD: i32 = 500;
 /// This is the only function that performs the perspective flip.
 pub fn evaluate(position: &Position) -> i32 {
     // 1. Cheap tapered score from the incrementally-maintained PST fields.
-    //    Blends from pure middlegame (game_phase=MAX) to pure endgame (game_phase=0).
+    //    Blends from pure middlegame (game_phase=MAX_GAME_PHASE) to pure endgame (game_phase=0).
     let tapered_score = ((position.middlegame_score * position.game_phase)
         + (position.endgame_score * (MAX_GAME_PHASE - position.game_phase)))
         / MAX_GAME_PHASE;
@@ -501,9 +504,22 @@ pub fn evaluate(position: &Position) -> i32 {
         };
     }
 
-    // 3. Expensive positional features — only reached when the position is close.
-    //    (Implemented in later tasks; for now, return the tapered score.)
-    let absolute_score = tapered_score;
+    // 3. Expensive positional features — only reached in near-balanced positions.
+
+    // Pawn structure: doubled pawns, isolated pawns, passed pawns.
+    let pawn_score = evaluate_pawn_structure(position);
+
+    // Mobility: reachable squares per piece type, blended by game phase.
+    let (mobility_middlegame, mobility_endgame) = evaluate_mobility(position);
+    let mobility_score = ((mobility_middlegame * position.game_phase)
+        + (mobility_endgame * (MAX_GAME_PHASE - position.game_phase)))
+        / MAX_GAME_PHASE;
+
+    // King safety: pawn shield and open files. Middlegame-only, scaled by phase.
+    let king_safety_score = (evaluate_king_safety(position) * position.game_phase) / MAX_GAME_PHASE;
+
+    // 4. Combine all terms (all White-minus-Black) and orient to side to move.
+    let absolute_score = tapered_score + pawn_score + mobility_score + king_safety_score;
 
     match position.side_to_move {
         Color::White => absolute_score,
@@ -514,7 +530,7 @@ pub fn evaluate(position: &Position) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::board::{from_fen, start_position};
+    use crate::board::{from_fen, start_position, PieceType};
 
     #[test]
     fn knight_positional_bonus_prefers_center_over_corner_in_middlegame() {
@@ -523,6 +539,17 @@ mod tests {
             MIDDLEGAME_PIECE_SQUARE_TABLES[PieceType::Knight as usize][27]
                 > MIDDLEGAME_PIECE_SQUARE_TABLES[PieceType::Knight as usize][0],
             "knight on d4 should have higher middlegame bonus than knight on a1"
+        );
+    }
+
+    #[test]
+    fn position_with_weak_pawn_structure_scores_worse_than_clean_structure() {
+        // White has doubled isolated pawns — should evaluate worse than clean pawns
+        let weak   = from_fen("4k3/8/8/8/4P3/4P3/8/4K3 w - - 0 1"); // doubled on e-file
+        let strong = from_fen("4k3/8/8/8/3P4/4P3/8/4K3 w - - 0 1"); // connected d4+e3
+        assert!(
+            evaluate(&weak) <= evaluate(&strong),
+            "weak pawn structure should not score better than clean structure"
         );
     }
 

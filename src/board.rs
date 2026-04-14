@@ -624,7 +624,7 @@ pub fn apply_move(position: &Position, chess_move: Move) -> Position {
     }
 
     new_position.side_to_move = position.side_to_move.opponent();
-    new_position.game_phase = new_position.game_phase.min(crate::eval::MAX_GAME_PHASE).max(0);
+    new_position.game_phase = new_position.game_phase.clamp(0, crate::eval::MAX_GAME_PHASE);
     new_position.recompute_occupancy();
     new_position
 }
