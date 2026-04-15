@@ -146,11 +146,12 @@ fn negamax_pvs(
     ply: u32,
     context: &mut SearchContext,
 ) -> i32 {
+    if context.stop_flag.load(Ordering::Relaxed) {
+        return 0;
+    }
+
     context.nodes_searched += 1;
     if context.nodes_searched.is_multiple_of(1024) {
-        if context.stop_flag.load(Ordering::Relaxed) {
-            return 0;
-        }
         let over_time = match &context.limits {
             SearchLimits::MoveTime(duration) => context.start_time.elapsed() >= *duration,
             SearchLimits::Clock { budget }   => context.start_time.elapsed() >= *budget,
@@ -262,11 +263,12 @@ fn quiescence_search(
     ply: u32,
     context: &mut SearchContext,
 ) -> i32 {
+    if context.stop_flag.load(Ordering::Relaxed) {
+        return 0;
+    }
+
     context.nodes_searched += 1;
     if context.nodes_searched.is_multiple_of(1024) {
-        if context.stop_flag.load(Ordering::Relaxed) {
-            return 0;
-        }
         let over_time = match &context.limits {
             SearchLimits::MoveTime(duration) => context.start_time.elapsed() >= *duration,
             SearchLimits::Clock { budget }   => context.start_time.elapsed() >= *budget,
