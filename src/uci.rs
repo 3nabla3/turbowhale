@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use tracing::instrument;
 
-use crate::board::{apply_move, from_fen, start_position, Position};
+use crate::board::{apply_move, try_from_fen, start_position, Position};
 use crate::engine::select_move;
 use crate::movegen::generate_legal_moves;
 use crate::perft::perft_divide;
@@ -307,7 +307,11 @@ fn handle_uci_line(line: &str, state: &mut UciState) -> LineOutcome {
         }
 
         UciCommand::Position { fen, moves } => {
-            state.current_position = from_fen(&fen);
+            let parsed_position = match try_from_fen(&fen) {
+                Ok(position) => position,
+                Err(_) => return LineOutcome::Continue,
+            };
+            state.current_position = parsed_position;
             for uci_move_string in &moves {
                 if let Some(chess_move) = parse_uci_move_string(uci_move_string, &state.current_position) {
                     state.current_position = apply_move(&state.current_position, chess_move);

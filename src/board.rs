@@ -327,18 +327,17 @@ impl std::fmt::Debug for Position {
     }
 }
 
-/// Parses a FEN string into a Position.
+/// Parses a FEN string into a Position, returning an error message on failure.
 ///
 /// Square indexing: a1=0, b1=1, …, h1=7, a2=8, …, h8=63.
-#[tracing::instrument]
-pub fn from_fen(fen: &str) -> Position {
+pub fn try_from_fen(fen: &str) -> Result<Position, String> {
     let mut parts = fen.split_whitespace();
-    let piece_placement = parts.next().expect("FEN missing piece placement");
-    let active_color = parts.next().expect("FEN missing active color");
-    let castling_availability = parts.next().expect("FEN missing castling");
-    let en_passant_target = parts.next().expect("FEN missing en passant");
-    let halfmove_clock_str = parts.next().expect("FEN missing halfmove clock");
-    let fullmove_number_str = parts.next().expect("FEN missing fullmove number");
+    let piece_placement = parts.next().ok_or("FEN missing piece placement")?;
+    let active_color = parts.next().ok_or("FEN missing active color")?;
+    let castling_availability = parts.next().ok_or("FEN missing castling availability")?;
+    let en_passant_target = parts.next().ok_or("FEN missing en passant target")?;
+    let halfmove_clock_str = parts.next().ok_or("FEN missing halfmove clock")?;
+    let fullmove_number_str = parts.next().ok_or("FEN missing fullmove number")?;
 
     let mut position = Position::empty();
 
@@ -355,6 +354,9 @@ pub fn from_fen(fen: &str) -> Position {
                 file += character as i32 - '0' as i32;
             }
             piece_char => {
+                if !(0..=7).contains(&rank) || !(0..=7).contains(&file) {
+                    return Err(format!("FEN piece placement out of bounds at rank={} file={}", rank, file));
+                }
                 let square = (rank * 8 + file) as usize;
                 let bit = 1u64 << square;
                 match piece_char {
@@ -370,7 +372,7 @@ pub fn from_fen(fen: &str) -> Position {
                     'r' => position.black_rooks |= bit,
                     'q' => position.black_queens |= bit,
                     'k' => position.black_king |= bit,
-                    _ => panic!("Unknown FEN piece character: {}", piece_char),
+                    _ => return Err(format!("Unknown FEN piece character: {}", piece_char)),
                 }
                 file += 1;
             }
@@ -380,36 +382,59 @@ pub fn from_fen(fen: &str) -> Position {
     position.side_to_move = match active_color {
         "w" => Color::White,
         "b" => Color::Black,
-        _ => panic!("Unknown active color in FEN: {}", active_color),
+        _ => return Err(format!("Unknown active color in FEN: {}", active_color)),
     };
 
-    position.castling_rights = castling_availability
-        .chars()
-        .fold(0u8, |rights, character| match character {
-            'K' => rights | (1 << 0),
-            'Q' => rights | (1 << 1),
-            'k' => rights | (1 << 2),
-            'q' => rights | (1 << 3),
-            '-' => rights,
-            _ => panic!("Unknown castling character in FEN: {}", character),
-        });
+    let mut castling_rights = 0u8;
+    for character in castling_availability.chars() {
+        match character {
+            'K' => castling_rights |= 1 << 0,
+            'Q' => castling_rights |= 1 << 1,
+            'k' => castling_rights |= 1 << 2,
+            'q' => castling_rights |= 1 << 3,
+            '-' => {}
+            _ => return Err(format!("Unknown castling character in FEN: {}", character)),
+        }
+    }
+    position.castling_rights = castling_rights;
 
     position.en_passant_square = if en_passant_target == "-" {
         None
     } else {
-        let file_char = en_passant_target.chars().next().expect("empty en passant");
-        let rank_char = en_passant_target.chars().nth(1).expect("en passant missing rank");
+        let mut en_passant_chars = en_passant_target.chars();
+        let file_char = en_passant_chars.next().ok_or("empty en passant target")?;
+        let rank_char = en_passant_chars.next().ok_or("en passant target missing rank")?;
+        if !file_char.is_ascii_lowercase() || !(b'a'..=b'h').contains(&(file_char as u8)) {
+            return Err(format!("Invalid en passant file: {}", file_char));
+        }
+        if !('1'..='8').contains(&rank_char) {
+            return Err(format!("Invalid en passant rank: {}", rank_char));
+        }
         let file_index = file_char as u8 - b'a';
         let rank_index = rank_char as u8 - b'1';
         Some(rank_index * 8 + file_index)
     };
 
-    position.halfmove_clock = halfmove_clock_str.parse().expect("invalid halfmove clock");
-    position.fullmove_number = fullmove_number_str.parse().expect("invalid fullmove number");
+    position.halfmove_clock = halfmove_clock_str
+        .parse()
+        .map_err(|_| format!("Invalid halfmove clock: {}", halfmove_clock_str))?;
+    position.fullmove_number = fullmove_number_str
+        .parse()
+        .map_err(|_| format!("Invalid fullmove number: {}", fullmove_number_str))?;
 
     position.recompute_occupancy();
     position.recompute_incremental_scores();
-    position
+    Ok(position)
+}
+
+/// Parses a FEN string into a Position.
+///
+/// Square indexing: a1=0, b1=1, …, h1=7, a2=8, …, h8=63.
+///
+/// Panics on malformed input. Use [`try_from_fen`] for untrusted input.
+#[tracing::instrument]
+pub fn from_fen(fen: &str) -> Position {
+    try_from_fen(fen).unwrap_or_else(|error| panic!("Invalid FEN \"{}\": {}", fen, error))
 }
 
 /// Returns the starting chess position.
