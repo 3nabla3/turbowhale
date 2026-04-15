@@ -22,8 +22,8 @@ async fn main() {
 
     // Run the UCI loop on stdin/stdout
     let stdin = std::io::stdin().lock();
-    let mut stdout = std::io::stdout();
-    uci::run_uci_loop(stdin, &mut stdout);
+    let stdout = std::io::stdout();
+    uci::run_uci_loop(stdin, stdout);
 
     // _telemetry_guard drops here, flushing all remaining spans
 }
