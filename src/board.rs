@@ -88,6 +88,13 @@ pub struct Position {
     pub en_passant_square: Option<u8>,
     pub halfmove_clock: u32,
     pub fullmove_number: u32,
+    /// Incrementally-maintained middlegame PST score (White minus Black, centipawns).
+    /// Updated by apply_move on every move; initialised by from_fen and start_position.
+    pub middlegame_score: i32,
+    /// Incrementally-maintained endgame PST score (White minus Black, centipawns).
+    pub endgame_score: i32,
+    /// Current game phase (0 = full endgame, 24 = full opening material on the board).
+    pub game_phase: i32,
 }
 
 impl Position {
@@ -113,6 +120,9 @@ impl Position {
             en_passant_square: None,
             halfmove_clock: 0,
             fullmove_number: 1,
+            middlegame_score: 0,
+            endgame_score: 0,
+            game_phase: 0,
         }
     }
 
@@ -141,6 +151,100 @@ impl Position {
             | self.black_queens
             | self.black_king;
         self.all_occupancy = self.white_occupancy | self.black_occupancy;
+    }
+
+    /// Recomputes `middlegame_score`, `endgame_score`, and `game_phase` from scratch
+    /// by scanning all occupied squares. Called once by `from_fen` and `start_position`.
+    pub fn recompute_incremental_scores(&mut self) {
+        use crate::eval::{
+            ENDGAME_MATERIAL_VALUES, ENDGAME_PIECE_SQUARE_TABLES,
+            MIDDLEGAME_MATERIAL_VALUES, MIDDLEGAME_PIECE_SQUARE_TABLES, PIECE_PHASE_VALUES,
+        };
+
+        self.middlegame_score = 0;
+        self.endgame_score = 0;
+        self.game_phase = 0;
+
+        let piece_bitboards: [(PieceType, u64, Color); 12] = [
+            (PieceType::Pawn,   self.white_pawns,   Color::White),
+            (PieceType::Knight, self.white_knights, Color::White),
+            (PieceType::Bishop, self.white_bishops, Color::White),
+            (PieceType::Rook,   self.white_rooks,   Color::White),
+            (PieceType::Queen,  self.white_queens,  Color::White),
+            (PieceType::King,   self.white_king,    Color::White),
+            (PieceType::Pawn,   self.black_pawns,   Color::Black),
+            (PieceType::Knight, self.black_knights, Color::Black),
+            (PieceType::Bishop, self.black_bishops, Color::Black),
+            (PieceType::Rook,   self.black_rooks,   Color::Black),
+            (PieceType::Queen,  self.black_queens,  Color::Black),
+            (PieceType::King,   self.black_king,    Color::Black),
+        ];
+
+        for (piece_type, mut bitboard, color) in piece_bitboards {
+            while bitboard != 0 {
+                let square = bitboard.trailing_zeros() as usize;
+                bitboard &= bitboard - 1;
+
+                let piece_index = piece_type as usize;
+                let lookup_square = match color {
+                    Color::White => square,
+                    Color::Black => square ^ 56,
+                };
+                let direction = match color {
+                    Color::White => 1,
+                    Color::Black => -1,
+                };
+
+                let middlegame_value = MIDDLEGAME_MATERIAL_VALUES[piece_index]
+                    + MIDDLEGAME_PIECE_SQUARE_TABLES[piece_index][lookup_square];
+                let endgame_value = ENDGAME_MATERIAL_VALUES[piece_index]
+                    + ENDGAME_PIECE_SQUARE_TABLES[piece_index][lookup_square];
+
+                self.middlegame_score += direction * middlegame_value;
+                self.endgame_score += direction * endgame_value;
+                self.game_phase += PIECE_PHASE_VALUES[piece_index];
+            }
+        }
+
+        // Clamp game_phase to [0, MAX_GAME_PHASE] in case of unusual positions
+        self.game_phase = self.game_phase.min(crate::eval::MAX_GAME_PHASE);
+    }
+
+    /// Updates `middlegame_score`, `endgame_score`, and `game_phase` for a single piece
+    /// placement or removal.
+    ///
+    /// `sign` must be `+1` when placing a piece on the board and `-1` when removing one.
+    /// `middlegame_score` and `endgame_score` are White-minus-Black: White placements
+    /// increase the score, Black placements decrease it.
+    fn update_piece_square_scores(
+        &mut self,
+        piece_type: PieceType,
+        color: Color,
+        square: usize,
+        sign: i32,
+    ) {
+        use crate::eval::{
+            ENDGAME_MATERIAL_VALUES, ENDGAME_PIECE_SQUARE_TABLES,
+            MIDDLEGAME_MATERIAL_VALUES, MIDDLEGAME_PIECE_SQUARE_TABLES, PIECE_PHASE_VALUES,
+        };
+
+        let piece_index = piece_type as usize;
+        let lookup_square = match color {
+            Color::White => square,
+            Color::Black => square ^ 56,
+        };
+        let direction = match color {
+            Color::White => sign,
+            Color::Black => -sign,
+        };
+
+        self.middlegame_score += direction
+            * (MIDDLEGAME_MATERIAL_VALUES[piece_index]
+                + MIDDLEGAME_PIECE_SQUARE_TABLES[piece_index][lookup_square]);
+        self.endgame_score += direction
+            * (ENDGAME_MATERIAL_VALUES[piece_index]
+                + ENDGAME_PIECE_SQUARE_TABLES[piece_index][lookup_square]);
+        self.game_phase += sign * PIECE_PHASE_VALUES[piece_index];
     }
 }
 
@@ -304,6 +408,7 @@ pub fn from_fen(fen: &str) -> Position {
     position.fullmove_number = fullmove_number_str.parse().expect("invalid fullmove number");
 
     position.recompute_occupancy();
+    position.recompute_incremental_scores();
     position
 }
 
@@ -336,6 +441,34 @@ pub fn apply_move(position: &Position, chess_move: Move) -> Position {
         PieceType::King
     };
 
+    // Detect any captured piece at the destination before clearing it,
+    // so we can update the incremental PST scores.
+    let captured_piece_type: Option<PieceType> =
+        if chess_move.move_flags.contains(MoveFlags::EN_PASSANT) {
+            Some(PieceType::Pawn)
+        } else {
+            let opponent_pieces: [(PieceType, u64); 5] = match position.side_to_move {
+                Color::White => [
+                    (PieceType::Pawn,   position.black_pawns),
+                    (PieceType::Knight, position.black_knights),
+                    (PieceType::Bishop, position.black_bishops),
+                    (PieceType::Rook,   position.black_rooks),
+                    (PieceType::Queen,  position.black_queens),
+                ],
+                Color::Black => [
+                    (PieceType::Pawn,   position.white_pawns),
+                    (PieceType::Knight, position.white_knights),
+                    (PieceType::Bishop, position.white_bishops),
+                    (PieceType::Rook,   position.white_rooks),
+                    (PieceType::Queen,  position.white_queens),
+                ],
+            };
+            opponent_pieces
+                .iter()
+                .find(|(_, bitboard)| bitboard & to_bit != 0)
+                .map(|(piece, _)| *piece)
+        };
+
     // Remove the moving piece from its source square
     match (position.side_to_move, moving_piece_type) {
         (Color::White, PieceType::Pawn)   => new_position.white_pawns   &= !from_bit,
@@ -351,6 +484,12 @@ pub fn apply_move(position: &Position, chess_move: Move) -> Position {
         (Color::Black, PieceType::Queen)  => new_position.black_queens  &= !from_bit,
         (Color::Black, PieceType::King)   => new_position.black_king    &= !from_bit,
     }
+    new_position.update_piece_square_scores(
+        moving_piece_type,
+        position.side_to_move,
+        chess_move.from_square as usize,
+        -1,
+    );
 
     // Remove any captured enemy piece from the destination square.
     // Always clear enemy pieces at the destination regardless of MoveFlags::CAPTURE, because
@@ -373,6 +512,14 @@ pub fn apply_move(position: &Position, chess_move: Move) -> Position {
                 new_position.white_queens  &= !to_bit;
             }
         }
+        if let Some(piece_type) = captured_piece_type {
+            new_position.update_piece_square_scores(
+                piece_type,
+                position.side_to_move.opponent(),
+                chess_move.to_square as usize,
+                -1,
+            );
+        }
     }
 
     // Place the moving piece (or promotion piece) on the destination square
@@ -391,6 +538,12 @@ pub fn apply_move(position: &Position, chess_move: Move) -> Position {
         (Color::Black, PieceType::Queen)  => new_position.black_queens  |= to_bit,
         (Color::Black, PieceType::King)   => new_position.black_king    |= to_bit,
     }
+    new_position.update_piece_square_scores(
+        destination_piece_type,
+        position.side_to_move,
+        chess_move.to_square as usize,
+        1,
+    );
 
     // En passant: remove the captured pawn (which is NOT on the destination square)
     if chess_move.move_flags.contains(MoveFlags::EN_PASSANT) {
@@ -402,6 +555,12 @@ pub fn apply_move(position: &Position, chess_move: Move) -> Position {
             Color::White => new_position.black_pawns &= !(1u64 << captured_pawn_square),
             Color::Black => new_position.white_pawns &= !(1u64 << captured_pawn_square),
         }
+        new_position.update_piece_square_scores(
+            PieceType::Pawn,
+            position.side_to_move.opponent(),
+            captured_pawn_square as usize,
+            -1,
+        );
     }
 
     // Castling: move the rook to its new square
@@ -423,6 +582,18 @@ pub fn apply_move(position: &Position, chess_move: Move) -> Position {
                 new_position.black_rooks |= 1u64 << rook_to_square;
             }
         }
+        new_position.update_piece_square_scores(
+            PieceType::Rook,
+            position.side_to_move,
+            rook_from_square as usize,
+            -1,
+        );
+        new_position.update_piece_square_scores(
+            PieceType::Rook,
+            position.side_to_move,
+            rook_to_square as usize,
+            1,
+        );
     }
 
     // Update castling rights: revoke rights for any moved king or rook
@@ -453,6 +624,7 @@ pub fn apply_move(position: &Position, chess_move: Move) -> Position {
     }
 
     new_position.side_to_move = position.side_to_move.opponent();
+    new_position.game_phase = new_position.game_phase.clamp(0, crate::eval::MAX_GAME_PHASE);
     new_position.recompute_occupancy();
     new_position
 }
@@ -474,6 +646,52 @@ fn castling_rights_mask_after_move(chess_move: Move) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn start_position_incremental_scores_are_zero() {
+        let position = start_position();
+        // Start position is perfectly symmetric — both sides have identical material and placement
+        assert_eq!(position.middlegame_score, 0);
+        assert_eq!(position.endgame_score, 0);
+    }
+
+    #[test]
+    fn start_position_game_phase_is_max() {
+        let position = start_position();
+        // Full set of pieces: 2 queens × 4 + 4 rooks × 2 + 4 bishops × 1 + 4 knights × 1 = 24
+        assert_eq!(position.game_phase, 24);
+    }
+
+    #[test]
+    fn lone_white_knight_on_d4_has_positive_middlegame_score() {
+        // White knight on d4 (square 27), no other pieces except kings
+        let position = from_fen("4k3/8/8/8/3N4/8/8/4K3 w - - 0 1");
+        // Knight on d4 contributes material (337) + positional bonus (positive for center)
+        assert!(position.middlegame_score > 0, "white knight on d4 should give positive middlegame score");
+    }
+
+    #[test]
+    fn apply_move_keeps_incremental_scores_consistent_with_recompute() {
+        use crate::movegen::generate_legal_moves;
+        let start = start_position();
+        for chess_move in generate_legal_moves(&start) {
+            let after_move = apply_move(&start, chess_move);
+            let mut recomputed = after_move.clone();
+            recomputed.recompute_incremental_scores();
+            assert_eq!(
+                after_move.middlegame_score, recomputed.middlegame_score,
+                "middlegame_score inconsistent after move {:?}", chess_move
+            );
+            assert_eq!(
+                after_move.endgame_score, recomputed.endgame_score,
+                "endgame_score inconsistent after move {:?}", chess_move
+            );
+            assert_eq!(
+                after_move.game_phase, recomputed.game_phase,
+                "game_phase inconsistent after move {:?}", chess_move
+            );
+        }
+    }
 
     #[test]
     fn white_and_black_are_different_colors() {
