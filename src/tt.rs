@@ -1,3 +1,4 @@
+use std::sync::Mutex;
 use std::sync::OnceLock;
 
 use crate::board::{Color, Move, Position};
@@ -20,34 +21,43 @@ pub struct TtEntry {
     pub node_type: NodeType,
 }
 
-pub struct TranspositionTable {
-    entries: Vec<Option<TtEntry>>,
-    pub size: usize,  // pub so tests can compute colliding hashes
+const SHARD_COUNT: usize = 256;
+
+pub struct ShardedTranspositionTable {
+    shards: Vec<Mutex<Vec<Option<TtEntry>>>>,
+    pub entries_per_shard: usize,
 }
 
-impl TranspositionTable {
+impl ShardedTranspositionTable {
     pub fn new(size_mb: usize) -> Self {
         let entry_bytes = std::mem::size_of::<Option<TtEntry>>();
         let target_entries = (size_mb * 1024 * 1024) / entry_bytes;
-        let size = (target_entries.next_power_of_two() / 2).max(1);
-        TranspositionTable {
-            entries: vec![None; size],
-            size,
+        let total_entries = (target_entries.next_power_of_two() / 2).max(SHARD_COUNT);
+        let entries_per_shard = (total_entries / SHARD_COUNT).max(1);
+        let shards = (0..SHARD_COUNT)
+            .map(|_| Mutex::new(vec![None; entries_per_shard]))
+            .collect();
+        ShardedTranspositionTable { shards, entries_per_shard }
+    }
+
+    pub fn clear(&self) {
+        for shard in &self.shards {
+            shard.lock().unwrap().iter_mut().for_each(|entry| *entry = None);
         }
     }
 
-    pub fn clear(&mut self) {
-        self.entries.iter_mut().for_each(|entry| *entry = None);
-    }
-
     pub fn probe(&self, hash: u64) -> Option<TtEntry> {
-        let index = (hash as usize) & (self.size - 1);
-        self.entries[index].filter(|entry| entry.hash == hash)
+        let shard_index = (hash as usize) & (SHARD_COUNT - 1);
+        let entry_index = ((hash >> 8) as usize) & (self.entries_per_shard - 1);
+        let shard = self.shards[shard_index].lock().unwrap();
+        shard[entry_index].filter(|entry| entry.hash == hash)
     }
 
-    pub fn store(&mut self, hash: u64, entry: TtEntry) {
-        let index = (hash as usize) & (self.size - 1);
-        self.entries[index] = Some(entry);
+    pub fn store(&self, hash: u64, entry: TtEntry) {
+        let shard_index = (hash as usize) & (SHARD_COUNT - 1);
+        let entry_index = ((hash >> 8) as usize) & (self.entries_per_shard - 1);
+        let mut shard = self.shards[shard_index].lock().unwrap();
+        shard[entry_index] = Some(entry);
     }
 }
 
@@ -166,14 +176,14 @@ mod tests {
     }
 
     #[test]
-    fn probe_returns_none_on_empty_table() {
-        let table = TranspositionTable::new(1);
+    fn sharded_probe_returns_none_on_empty_table() {
+        let table = ShardedTranspositionTable::new(1);
         assert!(table.probe(12345).is_none());
     }
 
     #[test]
-    fn store_then_probe_returns_entry() {
-        let mut table = TranspositionTable::new(1);
+    fn sharded_store_then_probe_returns_entry() {
+        let table = ShardedTranspositionTable::new(1);
         let dummy_move = Move {
             from_square: 12,
             to_square: 20,
@@ -195,31 +205,33 @@ mod tests {
     }
 
     #[test]
-    fn probe_returns_none_on_hash_collision() {
-        let mut table = TranspositionTable::new(1);
+    fn sharded_probe_returns_none_on_hash_collision() {
+        let table = ShardedTranspositionTable::new(1);
         let dummy_move = Move {
             from_square: 12,
             to_square: 20,
             promotion_piece: None,
             move_flags: MoveFlags::NONE,
         };
-        let entry = TtEntry {
-            hash: 0xAAAA,
+        let hash = 0xAAAAu64;
+        table.store(hash, TtEntry {
+            hash,
             depth: 4,
             score: 150,
             best_move: dummy_move,
             node_type: NodeType::Exact,
-        };
-        table.store(0xAAAA, entry);
-        // A hash that maps to the same slot but has a different value
-        let size = table.size;
-        let colliding_hash = 0xAAAAu64.wrapping_add(size as u64);
+        });
+        // A hash that maps to the same shard (same low 8 bits) and same slot
+        // (same bits 8..N) but is a distinct value — store under `hash` must not
+        // be returned when probing `colliding_hash`.
+        let colliding_hash = hash.wrapping_add((table.entries_per_shard as u64) << 8);
+        assert_ne!(colliding_hash, hash);
         assert!(table.probe(colliding_hash).is_none());
     }
 
     #[test]
-    fn clear_removes_all_entries() {
-        let mut table = TranspositionTable::new(1);
+    fn sharded_clear_removes_all_entries() {
+        let table = ShardedTranspositionTable::new(1);
         let dummy_move = Move {
             from_square: 12,
             to_square: 20,

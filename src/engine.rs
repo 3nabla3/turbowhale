@@ -1,11 +1,12 @@
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::board::{Color, Move, MoveFlags, PieceType, Position};
 use crate::eval::evaluate;
 use crate::movegen::{generate_legal_moves, generate_pseudo_legal_moves, is_square_attacked};
-use crate::tt::{compute_hash, NodeType, TranspositionTable, TtEntry};
+use crate::tt::{compute_hash, NodeType, ShardedTranspositionTable, TtEntry};
 use crate::uci::{GoParameters, move_to_uci_string};
 
 pub const MATE_SCORE: i32 = 100_000;
@@ -19,9 +20,9 @@ pub enum SearchLimits {
     Clock { budget: Duration },
 }
 
-pub struct SearchContext<'a> {
-    pub transposition_table: &'a mut TranspositionTable,
-    pub stop_flag: &'a AtomicBool,
+pub struct SearchContext {
+    pub transposition_table: Arc<ShardedTranspositionTable>,
+    pub stop_flag: Arc<AtomicBool>,
     pub limits: SearchLimits,
     pub start_time: Instant,
     pub nodes_searched: u64,
@@ -31,8 +32,9 @@ pub struct SearchContext<'a> {
 pub fn select_move(
     position: &Position,
     go_parameters: &GoParameters,
-    transposition_table: &mut TranspositionTable,
-    stop_flag: &AtomicBool,
+    transposition_table: Arc<ShardedTranspositionTable>,
+    stop_flag: Arc<AtomicBool>,
+    _thread_count: usize,
 ) -> Move {
     let limits = compute_search_limits(go_parameters, position.side_to_move);
 
@@ -45,8 +47,8 @@ pub fn select_move(
     };
 
     let mut context = SearchContext {
-        transposition_table,
-        stop_flag,
+        transposition_table: Arc::clone(&transposition_table),
+        stop_flag: Arc::clone(&stop_flag),
         limits,
         start_time: Instant::now(),
         nodes_searched: 0,
@@ -83,7 +85,7 @@ pub fn select_move(
                 format!("cp {}", tt_entry.score)
             };
 
-            let pv = extract_pv_from_tt(position, context.transposition_table, depth);
+            let pv = extract_pv_from_tt(position, &context.transposition_table, depth);
             let pv_string = if pv.is_empty() {
                 move_to_uci_string(best_move)
             } else {
@@ -409,7 +411,7 @@ fn order_moves(mut moves: Vec<Move>, position: &Position, tt_best_move: Option<M
     moves
 }
 
-fn extract_pv_from_tt(root: &Position, tt: &TranspositionTable, max_depth: u32) -> Vec<Move> {
+fn extract_pv_from_tt(root: &Position, tt: &ShardedTranspositionTable, max_depth: u32) -> Vec<Move> {
     let mut pv = Vec::new();
     let mut current_position = root.clone();
     let mut visited_hashes: HashSet<u64> = HashSet::new();
@@ -442,22 +444,22 @@ mod tests {
     use crate::board::{from_fen, start_position};
     use crate::uci::GoParameters;
 
-    fn make_tt() -> TranspositionTable {
-        TranspositionTable::new(4)
+    fn make_tt() -> Arc<ShardedTranspositionTable> {
+        Arc::new(ShardedTranspositionTable::new(4))
     }
 
-    fn make_stop() -> AtomicBool {
-        AtomicBool::new(false)
+    fn make_stop() -> Arc<AtomicBool> {
+        Arc::new(AtomicBool::new(false))
     }
 
     #[test]
     fn select_move_returns_legal_move_from_start_position() {
         let position = start_position();
         let legal_moves = generate_legal_moves(&position);
-        let mut tt = make_tt();
+        let tt = make_tt();
         let stop = make_stop();
         let params = GoParameters { depth: Some(1), ..Default::default() };
-        let chosen = select_move(&position, &params, &mut tt, &stop);
+        let chosen = select_move(&position, &params, tt, stop, 1);
         assert!(legal_moves.contains(&chosen), "selected move must be legal");
     }
 
@@ -467,10 +469,10 @@ mod tests {
         // g6=46, h6=47, g8=62. After Qh8 (47->63): black king g8 is in check, escapes
         // blocked: f8 by queen on h8 (rank), f7 by king on g6, g7 by king on g6, h7 by queen (file).
         let position = from_fen("6k1/8/6KQ/8/8/8/8/8 w - - 0 1");
-        let mut tt = make_tt();
+        let tt = make_tt();
         let stop = make_stop();
         let params = GoParameters { depth: Some(3), ..Default::default() };
-        let chosen = select_move(&position, &params, &mut tt, &stop);
+        let chosen = select_move(&position, &params, tt, stop, 1);
         let after = crate::board::apply_move(&position, chosen);
         let opponent_moves = generate_legal_moves(&after);
         assert!(
@@ -484,10 +486,10 @@ mod tests {
     fn select_move_captures_hanging_queen() {
         // White rook on a5 can take free black queen on e5 (same rank, undefended)
         let position = from_fen("4k3/8/8/R3q3/8/8/8/4K3 w - - 0 1");
-        let mut tt = make_tt();
+        let tt = make_tt();
         let stop = make_stop();
         let params = GoParameters { depth: Some(3), ..Default::default() };
-        let chosen = select_move(&position, &params, &mut tt, &stop);
+        let chosen = select_move(&position, &params, tt, stop, 1);
         assert_eq!(chosen.to_square, 36, "should capture queen on e5 (square 36)");
     }
 
@@ -495,11 +497,9 @@ mod tests {
     fn negamax_returns_zero_for_stalemate() {
         // Black king stalemated: black king a8, white king b6, white queen c7
         let position = from_fen("k7/2Q5/1K6/8/8/8/8/8 b - - 0 1");
-        let mut tt = make_tt();
-        let stop = make_stop();
         let mut context = SearchContext {
-            transposition_table: &mut tt,
-            stop_flag: &stop,
+            transposition_table: Arc::new(ShardedTranspositionTable::new(4)),
+            stop_flag: Arc::new(AtomicBool::new(false)),
             limits: SearchLimits::Depth(4),
             start_time: Instant::now(),
             nodes_searched: 0,
@@ -512,11 +512,9 @@ mod tests {
     fn negamax_detects_checkmate() {
         // Fool's mate — white is in checkmate
         let position = from_fen("rnb1kbnr/pppp1ppp/8/4p3/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq - 1 3");
-        let mut tt = make_tt();
-        let stop = make_stop();
         let mut context = SearchContext {
-            transposition_table: &mut tt,
-            stop_flag: &stop,
+            transposition_table: Arc::new(ShardedTranspositionTable::new(4)),
+            stop_flag: Arc::new(AtomicBool::new(false)),
             limits: SearchLimits::Depth(1),
             start_time: Instant::now(),
             nodes_searched: 0,
@@ -528,11 +526,11 @@ mod tests {
     #[test]
     fn extract_pv_from_tt_returns_moves_up_to_depth() {
         let position = start_position();
-        let mut tt = make_tt();
+        let tt = make_tt();
         let stop = make_stop();
         let params = GoParameters { depth: Some(3), ..Default::default() };
         // Run a search so the TT is populated
-        select_move(&position, &params, &mut tt, &stop);
+        select_move(&position, &params, Arc::clone(&tt), stop, 1);
         // PV should have at least 1 move and at most 3
         let pv = extract_pv_from_tt(&position, &tt, 3);
         assert!(!pv.is_empty(), "PV must contain at least the best move");
@@ -550,11 +548,11 @@ mod tests {
     #[test]
     fn select_move_emits_uci_info_line_to_stdout() {
         let position = start_position();
-        let mut tt = make_tt();
+        let tt = make_tt();
         let stop = make_stop();
         let params = GoParameters { depth: Some(2), ..Default::default() };
         // Should not panic — this is the main assertion
-        let chosen = select_move(&position, &params, &mut tt, &stop);
+        let chosen = select_move(&position, &params, tt, stop, 1);
         let legal_moves = generate_legal_moves(&position);
         assert!(legal_moves.contains(&chosen));
     }

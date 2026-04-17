@@ -8,7 +8,7 @@ use crate::board::{apply_move, try_from_fen, start_position, Position};
 use crate::engine::select_move;
 use crate::movegen::generate_legal_moves;
 use crate::perft::perft_divide;
-use crate::tt::TranspositionTable;
+use crate::tt::ShardedTranspositionTable;
 
 const START_POSITION_FEN: &str =
     "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
@@ -249,9 +249,10 @@ struct UciState {
     current_position: Position,
     debug_mode: bool,
     stop_flag: Arc<AtomicBool>,
-    transposition_table: Arc<Mutex<TranspositionTable>>,
+    transposition_table: Arc<ShardedTranspositionTable>,
     search_thread: Option<std::thread::JoinHandle<()>>,
     output: Arc<Mutex<Box<dyn Write + Send>>>,
+    thread_count: usize,
 }
 
 impl UciState {
@@ -260,9 +261,10 @@ impl UciState {
             current_position: start_position(),
             debug_mode: false,
             stop_flag: Arc::new(AtomicBool::new(false)),
-            transposition_table: Arc::new(Mutex::new(TranspositionTable::new(16))),
+            transposition_table: Arc::new(ShardedTranspositionTable::new(16)),
             search_thread: None,
             output,
+            thread_count: 1,
         }
     }
 
@@ -303,7 +305,7 @@ fn handle_uci_line(line: &str, state: &mut UciState) -> LineOutcome {
             state.stop_search();
             state.current_position = start_position();
             state.stop_flag.store(false, Ordering::Relaxed);
-            state.transposition_table.lock().unwrap().clear();
+            state.transposition_table.clear();
         }
 
         UciCommand::Position { fen, moves } => {
@@ -348,10 +350,10 @@ fn handle_uci_line(line: &str, state: &mut UciState) -> LineOutcome {
             let stop_flag = Arc::clone(&state.stop_flag);
             let tt_arc = Arc::clone(&state.transposition_table);
             let output_arc = Arc::clone(&state.output);
+            let thread_count = state.thread_count;
 
             let handle = std::thread::spawn(move || {
-                let mut tt = tt_arc.lock().unwrap();
-                let chosen = select_move(&position, &parameters, &mut tt, &stop_flag);
+                let chosen = select_move(&position, &parameters, tt_arc, stop_flag, thread_count);
                 let mut output = output_arc.lock().unwrap();
                 writeln!(output, "bestmove {}", move_to_uci_string(chosen)).unwrap();
                 output.flush().unwrap();
