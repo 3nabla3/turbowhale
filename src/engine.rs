@@ -11,6 +11,7 @@ use crate::uci::{GoParameters, move_to_uci_string};
 
 pub const MATE_SCORE: i32 = 100_000;
 const INF: i32 = 200_000;
+const NULL_MOVE_REDUCTION: u32 = 2;
 
 #[derive(Clone)]
 pub enum SearchLimits {
@@ -245,6 +246,34 @@ fn negamax_pvs(
             }
             if alpha >= beta {
                 return tt_entry.score;
+            }
+        }
+    }
+
+    // Null move pruning: if the position is so good that even passing our turn
+    // fails to let the opponent recover, prune this subtree.
+    if !is_in_check && ply > 0 && depth > NULL_MOVE_REDUCTION {
+        let has_non_pawn_non_king_piece = match position.side_to_move {
+            Color::White => (position.white_knights | position.white_bishops
+                           | position.white_rooks  | position.white_queens) != 0,
+            Color::Black => (position.black_knights | position.black_bishops
+                           | position.black_rooks  | position.black_queens) != 0,
+        };
+        if has_non_pawn_non_king_piece {
+            let mut null_position = position.clone();
+            null_position.side_to_move = position.side_to_move.opponent();
+            null_position.en_passant_square = None;
+            null_position.halfmove_clock += 1;
+            let null_score = -negamax_pvs(
+                &null_position,
+                depth - 1 - NULL_MOVE_REDUCTION,
+                -beta,
+                -beta + 1,
+                ply + 1,
+                context,
+            );
+            if null_score >= beta {
+                return beta;
             }
         }
     }
