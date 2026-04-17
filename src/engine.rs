@@ -29,15 +29,56 @@ pub struct SearchContext {
     pub nodes_searched: u64,
 }
 
+fn search_worker(
+    position: Position,
+    limits: SearchLimits,
+    start_time: Instant,
+    transposition_table: Arc<ShardedTranspositionTable>,
+    stop_flag: Arc<AtomicBool>,
+    shared_nodes: Arc<AtomicU64>,
+) {
+    let mut context = SearchContext {
+        transposition_table,
+        stop_flag,
+        shared_nodes,
+        limits,
+        start_time,
+        nodes_searched: 0,
+    };
+    for depth in 1..=100 {
+        negamax_pvs(&position, depth, -INF, INF, 0, &mut context);
+        if context.stop_flag.load(Ordering::Relaxed) {
+            break;
+        }
+    }
+}
+
 /// Selects the best move for the current position using iterative deepening PVS.
 pub fn select_move(
     position: &Position,
     go_parameters: &GoParameters,
     transposition_table: Arc<ShardedTranspositionTable>,
     stop_flag: Arc<AtomicBool>,
-    _thread_count: usize,
+    thread_count: usize,
 ) -> Move {
     let limits = compute_search_limits(go_parameters, position.side_to_move);
+    let shared_nodes = Arc::new(AtomicU64::new(0));
+    let start_time = Instant::now();
+
+    // Spawn thread_count - 1 helper threads. Each searches independently and
+    // contributes to the shared TT and node counter.
+    let helper_handles: Vec<_> = (1..thread_count)
+        .map(|_| {
+            let position_clone = position.clone();
+            let limits_clone = limits.clone();
+            let tt_clone = Arc::clone(&transposition_table);
+            let stop_clone = Arc::clone(&stop_flag);
+            let nodes_clone = Arc::clone(&shared_nodes);
+            std::thread::spawn(move || {
+                search_worker(position_clone, limits_clone, start_time, tt_clone, stop_clone, nodes_clone);
+            })
+        })
+        .collect();
 
     let legal_moves = generate_legal_moves(position);
     let mut best_move = *legal_moves.first().expect("select_move called with no legal moves");
@@ -47,14 +88,12 @@ pub fn select_move(
         _ => 100,
     };
 
-    let shared_nodes = Arc::new(AtomicU64::new(0));
-
     let mut context = SearchContext {
         transposition_table: Arc::clone(&transposition_table),
         stop_flag: Arc::clone(&stop_flag),
         shared_nodes: Arc::clone(&shared_nodes),
         limits,
-        start_time: Instant::now(),
+        start_time,
         nodes_searched: 0,
     };
 
@@ -104,21 +143,17 @@ pub fn select_move(
             };
 
             println!("info depth {} score {} nodes {} nps {} time {} pv {}",
-                depth,
-                score_field,
-                total_nodes,
-                nps,
-                elapsed.as_millis(),
-                pv_string,
-            );
+                depth, score_field, total_nodes, nps, elapsed.as_millis(), pv_string);
         } else {
             println!("info depth {} nodes {} nps {} time {}",
-                depth,
-                total_nodes,
-                nps,
-                elapsed.as_millis(),
-            );
+                depth, total_nodes, nps, elapsed.as_millis());
         }
+    }
+
+    // Signal helpers to stop and wait for them to exit.
+    stop_flag.store(true, Ordering::Relaxed);
+    for handle in helper_handles {
+        handle.join().ok();
     }
 
     best_move
@@ -589,5 +624,16 @@ mod tests {
         let chosen = select_move(&position, &params, tt, stop, 1);
         let legal_moves = generate_legal_moves(&position);
         assert!(legal_moves.contains(&chosen));
+    }
+
+    #[test]
+    fn select_move_with_two_threads_returns_legal_move() {
+        let position = crate::board::start_position();
+        let legal_moves = generate_legal_moves(&position);
+        let tt = Arc::new(ShardedTranspositionTable::new(4));
+        let stop = Arc::new(AtomicBool::new(false));
+        let params = GoParameters { depth: Some(2), ..Default::default() };
+        let chosen = select_move(&position, &params, tt, stop, 2);
+        assert!(legal_moves.contains(&chosen), "two-thread search must return a legal move");
     }
 }
