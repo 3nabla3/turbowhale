@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::board::{Color, Move, MoveFlags, PieceType, Position};
@@ -23,6 +23,7 @@ pub enum SearchLimits {
 pub struct SearchContext {
     pub transposition_table: Arc<ShardedTranspositionTable>,
     pub stop_flag: Arc<AtomicBool>,
+    pub shared_nodes: Arc<AtomicU64>,
     pub limits: SearchLimits,
     pub start_time: Instant,
     pub nodes_searched: u64,
@@ -46,9 +47,12 @@ pub fn select_move(
         _ => 100,
     };
 
+    let shared_nodes = Arc::new(AtomicU64::new(0));
+
     let mut context = SearchContext {
         transposition_table: Arc::clone(&transposition_table),
         stop_flag: Arc::clone(&stop_flag),
+        shared_nodes: Arc::clone(&shared_nodes),
         limits,
         start_time: Instant::now(),
         nodes_searched: 0,
@@ -57,15 +61,19 @@ pub fn select_move(
     for depth in 1..=max_depth {
         negamax_pvs(position, depth, -INF, INF, 0, &mut context);
 
+        // Flush unflushed local nodes into the shared counter.
+        context.shared_nodes.fetch_add(context.nodes_searched, Ordering::Relaxed);
+        context.nodes_searched = 0;
+
         if context.stop_flag.load(Ordering::Relaxed) && depth > 1 {
             break;
         }
 
         let position_hash = compute_hash(position);
         let elapsed = context.start_time.elapsed();
-        let nodes = context.nodes_searched;
+        let total_nodes = context.shared_nodes.load(Ordering::Relaxed);
         let nps = if elapsed.as_millis() > 0 {
-            (nodes as f64 / elapsed.as_millis() as f64 * 1000.0) as u64
+            (total_nodes as f64 / elapsed.as_millis() as f64 * 1000.0) as u64
         } else {
             0
         };
@@ -98,7 +106,7 @@ pub fn select_move(
             println!("info depth {} score {} nodes {} nps {} time {} pv {}",
                 depth,
                 score_field,
-                nodes,
+                total_nodes,
                 nps,
                 elapsed.as_millis(),
                 pv_string,
@@ -106,7 +114,7 @@ pub fn select_move(
         } else {
             println!("info depth {} nodes {} nps {} time {}",
                 depth,
-                nodes,
+                total_nodes,
                 nps,
                 elapsed.as_millis(),
             );
@@ -154,6 +162,8 @@ fn negamax_pvs(
 
     context.nodes_searched += 1;
     if context.nodes_searched.is_multiple_of(1024) {
+        context.shared_nodes.fetch_add(1024, Ordering::Relaxed);
+        context.nodes_searched = 0;
         let over_time = match &context.limits {
             SearchLimits::MoveTime(duration) => context.start_time.elapsed() >= *duration,
             SearchLimits::Clock { budget }   => context.start_time.elapsed() >= *budget,
@@ -271,6 +281,8 @@ fn quiescence_search(
 
     context.nodes_searched += 1;
     if context.nodes_searched.is_multiple_of(1024) {
+        context.shared_nodes.fetch_add(1024, Ordering::Relaxed);
+        context.nodes_searched = 0;
         let over_time = match &context.limits {
             SearchLimits::MoveTime(duration) => context.start_time.elapsed() >= *duration,
             SearchLimits::Clock { budget }   => context.start_time.elapsed() >= *budget,
@@ -500,6 +512,7 @@ mod tests {
         let mut context = SearchContext {
             transposition_table: Arc::new(ShardedTranspositionTable::new(4)),
             stop_flag: Arc::new(AtomicBool::new(false)),
+            shared_nodes: Arc::new(AtomicU64::new(0)),
             limits: SearchLimits::Depth(4),
             start_time: Instant::now(),
             nodes_searched: 0,
@@ -515,12 +528,33 @@ mod tests {
         let mut context = SearchContext {
             transposition_table: Arc::new(ShardedTranspositionTable::new(4)),
             stop_flag: Arc::new(AtomicBool::new(false)),
+            shared_nodes: Arc::new(AtomicU64::new(0)),
             limits: SearchLimits::Depth(1),
             start_time: Instant::now(),
             nodes_searched: 0,
         };
         let score = negamax_pvs(&position, 1, -INF, INF, 0, &mut context);
         assert!(score < -MATE_SCORE / 2, "checkmate should return large negative, got {}", score);
+    }
+
+    #[test]
+    fn search_context_shared_nodes_accumulates_across_search() {
+        use std::sync::atomic::AtomicU64;
+        let position = crate::board::start_position();
+        let shared_nodes = Arc::new(AtomicU64::new(0));
+        let mut context = SearchContext {
+            transposition_table: Arc::new(ShardedTranspositionTable::new(4)),
+            stop_flag: Arc::new(AtomicBool::new(false)),
+            shared_nodes: Arc::clone(&shared_nodes),
+            limits: SearchLimits::Depth(2),
+            start_time: Instant::now(),
+            nodes_searched: 0,
+        };
+        negamax_pvs(&position, 2, -INF, INF, 0, &mut context);
+        // After a depth-2 search, the shared counter must have been incremented.
+        // Flush the local remainder into shared_nodes first.
+        shared_nodes.fetch_add(context.nodes_searched, Ordering::Relaxed);
+        assert!(shared_nodes.load(Ordering::Relaxed) > 0, "shared_nodes must be non-zero after search");
     }
 
     #[test]
