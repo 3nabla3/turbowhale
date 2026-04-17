@@ -25,7 +25,7 @@ const SHARD_COUNT: usize = 256;
 
 pub struct ShardedTranspositionTable {
     shards: Vec<Mutex<Vec<Option<TtEntry>>>>,
-    pub entries_per_shard: usize,
+    pub(crate) entries_per_shard: usize,
 }
 
 impl ShardedTranspositionTable {
