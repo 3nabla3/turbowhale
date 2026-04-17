@@ -207,7 +207,7 @@ fn negamax_pvs(
             SearchLimits::Depth(_) | SearchLimits::Infinite => false,
         };
         if over_time {
-            context.stop_flag.store(true, Ordering::Relaxed);
+            context.stop_flag.store(true, Ordering::Release);
             return 0;
         }
     }
@@ -326,7 +326,7 @@ fn quiescence_search(
             SearchLimits::Depth(_) | SearchLimits::Infinite => false,
         };
         if over_time {
-            context.stop_flag.store(true, Ordering::Relaxed);
+            context.stop_flag.store(true, Ordering::Release);
             return 0;
         }
     }
