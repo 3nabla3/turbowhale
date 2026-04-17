@@ -51,6 +51,8 @@ fn search_worker(
             break;
         }
     }
+    // Flush any nodes accumulated since the last 1024-node batch boundary.
+    context.shared_nodes.fetch_add(context.nodes_searched, Ordering::Relaxed);
 }
 
 /// Selects the best move for the current position using iterative deepening PVS.
@@ -73,9 +75,9 @@ pub fn select_move(
             let limits_clone = limits.clone();
             let tt_clone = Arc::clone(&transposition_table);
             let stop_clone = Arc::clone(&stop_flag);
-            let nodes_clone = Arc::clone(&shared_nodes);
+            let shared_nodes_clone = Arc::clone(&shared_nodes);
             std::thread::spawn(move || {
-                search_worker(position_clone, limits_clone, start_time, tt_clone, stop_clone, nodes_clone);
+                search_worker(position_clone, limits_clone, start_time, tt_clone, stop_clone, shared_nodes_clone);
             })
         })
         .collect();
@@ -151,7 +153,7 @@ pub fn select_move(
     }
 
     // Signal helpers to stop and wait for them to exit.
-    stop_flag.store(true, Ordering::Relaxed);
+    stop_flag.store(true, Ordering::Release);
     for handle in helper_handles {
         handle.join().ok();
     }
