@@ -1,11 +1,12 @@
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::board::{Color, Move, MoveFlags, PieceType, Position};
 use crate::eval::evaluate;
 use crate::movegen::{generate_legal_moves, generate_pseudo_legal_moves, is_square_attacked};
-use crate::tt::{compute_hash, NodeType, TranspositionTable, TtEntry};
+use crate::tt::{compute_hash, NodeType, ShardedTranspositionTable, TtEntry};
 use crate::uci::{GoParameters, move_to_uci_string};
 
 pub const MATE_SCORE: i32 = 100_000;
@@ -19,22 +20,67 @@ pub enum SearchLimits {
     Clock { budget: Duration },
 }
 
-pub struct SearchContext<'a> {
-    pub transposition_table: &'a mut TranspositionTable,
-    pub stop_flag: &'a AtomicBool,
+pub struct SearchContext {
+    pub transposition_table: Arc<ShardedTranspositionTable>,
+    pub stop_flag: Arc<AtomicBool>,
+    pub shared_nodes: Arc<AtomicU64>,
     pub limits: SearchLimits,
     pub start_time: Instant,
     pub nodes_searched: u64,
+}
+
+fn search_worker(
+    position: Position,
+    limits: SearchLimits,
+    start_time: Instant,
+    transposition_table: Arc<ShardedTranspositionTable>,
+    stop_flag: Arc<AtomicBool>,
+    shared_nodes: Arc<AtomicU64>,
+) {
+    let mut context = SearchContext {
+        transposition_table,
+        stop_flag,
+        shared_nodes,
+        limits,
+        start_time,
+        nodes_searched: 0,
+    };
+    for depth in 1..=100 {
+        negamax_pvs(&position, depth, -INF, INF, 0, &mut context);
+        if context.stop_flag.load(Ordering::Relaxed) {
+            break;
+        }
+    }
+    // Flush any nodes accumulated since the last 1024-node batch boundary.
+    context.shared_nodes.fetch_add(context.nodes_searched, Ordering::Relaxed);
 }
 
 /// Selects the best move for the current position using iterative deepening PVS.
 pub fn select_move(
     position: &Position,
     go_parameters: &GoParameters,
-    transposition_table: &mut TranspositionTable,
-    stop_flag: &AtomicBool,
+    transposition_table: Arc<ShardedTranspositionTable>,
+    stop_flag: Arc<AtomicBool>,
+    thread_count: usize,
 ) -> Move {
     let limits = compute_search_limits(go_parameters, position.side_to_move);
+    let shared_nodes = Arc::new(AtomicU64::new(0));
+    let start_time = Instant::now();
+
+    // Spawn thread_count - 1 helper threads. Each searches independently and
+    // contributes to the shared TT and node counter.
+    let helper_handles: Vec<_> = (1..thread_count)
+        .map(|_| {
+            let position_clone = position.clone();
+            let limits_clone = limits.clone();
+            let tt_clone = Arc::clone(&transposition_table);
+            let stop_clone = Arc::clone(&stop_flag);
+            let shared_nodes_clone = Arc::clone(&shared_nodes);
+            std::thread::spawn(move || {
+                search_worker(position_clone, limits_clone, start_time, tt_clone, stop_clone, shared_nodes_clone);
+            })
+        })
+        .collect();
 
     let legal_moves = generate_legal_moves(position);
     let mut best_move = *legal_moves.first().expect("select_move called with no legal moves");
@@ -45,15 +91,20 @@ pub fn select_move(
     };
 
     let mut context = SearchContext {
-        transposition_table,
-        stop_flag,
+        transposition_table: Arc::clone(&transposition_table),
+        stop_flag: Arc::clone(&stop_flag),
+        shared_nodes: Arc::clone(&shared_nodes),
         limits,
-        start_time: Instant::now(),
+        start_time,
         nodes_searched: 0,
     };
 
     for depth in 1..=max_depth {
         negamax_pvs(position, depth, -INF, INF, 0, &mut context);
+
+        // Flush unflushed local nodes into the shared counter.
+        context.shared_nodes.fetch_add(context.nodes_searched, Ordering::Relaxed);
+        context.nodes_searched = 0;
 
         if context.stop_flag.load(Ordering::Relaxed) && depth > 1 {
             break;
@@ -61,9 +112,9 @@ pub fn select_move(
 
         let position_hash = compute_hash(position);
         let elapsed = context.start_time.elapsed();
-        let nodes = context.nodes_searched;
+        let total_nodes = context.shared_nodes.load(Ordering::Relaxed);
         let nps = if elapsed.as_millis() > 0 {
-            (nodes as f64 / elapsed.as_millis() as f64 * 1000.0) as u64
+            (total_nodes as f64 / elapsed.as_millis() as f64 * 1000.0) as u64
         } else {
             0
         };
@@ -83,7 +134,7 @@ pub fn select_move(
                 format!("cp {}", tt_entry.score)
             };
 
-            let pv = extract_pv_from_tt(position, context.transposition_table, depth);
+            let pv = extract_pv_from_tt(position, &context.transposition_table, depth);
             let pv_string = if pv.is_empty() {
                 move_to_uci_string(best_move)
             } else {
@@ -94,21 +145,17 @@ pub fn select_move(
             };
 
             println!("info depth {} score {} nodes {} nps {} time {} pv {}",
-                depth,
-                score_field,
-                nodes,
-                nps,
-                elapsed.as_millis(),
-                pv_string,
-            );
+                depth, score_field, total_nodes, nps, elapsed.as_millis(), pv_string);
         } else {
             println!("info depth {} nodes {} nps {} time {}",
-                depth,
-                nodes,
-                nps,
-                elapsed.as_millis(),
-            );
+                depth, total_nodes, nps, elapsed.as_millis());
         }
+    }
+
+    // Signal helpers to stop and wait for them to exit.
+    stop_flag.store(true, Ordering::Release);
+    for handle in helper_handles {
+        handle.join().ok();
     }
 
     best_move
@@ -152,13 +199,15 @@ fn negamax_pvs(
 
     context.nodes_searched += 1;
     if context.nodes_searched.is_multiple_of(1024) {
+        context.shared_nodes.fetch_add(1024, Ordering::Relaxed);
+        context.nodes_searched = 0;
         let over_time = match &context.limits {
             SearchLimits::MoveTime(duration) => context.start_time.elapsed() >= *duration,
             SearchLimits::Clock { budget }   => context.start_time.elapsed() >= *budget,
             SearchLimits::Depth(_) | SearchLimits::Infinite => false,
         };
         if over_time {
-            context.stop_flag.store(true, Ordering::Relaxed);
+            context.stop_flag.store(true, Ordering::Release);
             return 0;
         }
     }
@@ -269,13 +318,15 @@ fn quiescence_search(
 
     context.nodes_searched += 1;
     if context.nodes_searched.is_multiple_of(1024) {
+        context.shared_nodes.fetch_add(1024, Ordering::Relaxed);
+        context.nodes_searched = 0;
         let over_time = match &context.limits {
             SearchLimits::MoveTime(duration) => context.start_time.elapsed() >= *duration,
             SearchLimits::Clock { budget }   => context.start_time.elapsed() >= *budget,
             SearchLimits::Depth(_) | SearchLimits::Infinite => false,
         };
         if over_time {
-            context.stop_flag.store(true, Ordering::Relaxed);
+            context.stop_flag.store(true, Ordering::Release);
             return 0;
         }
     }
@@ -409,7 +460,7 @@ fn order_moves(mut moves: Vec<Move>, position: &Position, tt_best_move: Option<M
     moves
 }
 
-fn extract_pv_from_tt(root: &Position, tt: &TranspositionTable, max_depth: u32) -> Vec<Move> {
+fn extract_pv_from_tt(root: &Position, tt: &ShardedTranspositionTable, max_depth: u32) -> Vec<Move> {
     let mut pv = Vec::new();
     let mut current_position = root.clone();
     let mut visited_hashes: HashSet<u64> = HashSet::new();
@@ -442,22 +493,22 @@ mod tests {
     use crate::board::{from_fen, start_position};
     use crate::uci::GoParameters;
 
-    fn make_tt() -> TranspositionTable {
-        TranspositionTable::new(4)
+    fn make_tt() -> Arc<ShardedTranspositionTable> {
+        Arc::new(ShardedTranspositionTable::new(4))
     }
 
-    fn make_stop() -> AtomicBool {
-        AtomicBool::new(false)
+    fn make_stop() -> Arc<AtomicBool> {
+        Arc::new(AtomicBool::new(false))
     }
 
     #[test]
     fn select_move_returns_legal_move_from_start_position() {
         let position = start_position();
         let legal_moves = generate_legal_moves(&position);
-        let mut tt = make_tt();
+        let tt = make_tt();
         let stop = make_stop();
         let params = GoParameters { depth: Some(1), ..Default::default() };
-        let chosen = select_move(&position, &params, &mut tt, &stop);
+        let chosen = select_move(&position, &params, tt, stop, 1);
         assert!(legal_moves.contains(&chosen), "selected move must be legal");
     }
 
@@ -467,10 +518,10 @@ mod tests {
         // g6=46, h6=47, g8=62. After Qh8 (47->63): black king g8 is in check, escapes
         // blocked: f8 by queen on h8 (rank), f7 by king on g6, g7 by king on g6, h7 by queen (file).
         let position = from_fen("6k1/8/6KQ/8/8/8/8/8 w - - 0 1");
-        let mut tt = make_tt();
+        let tt = make_tt();
         let stop = make_stop();
         let params = GoParameters { depth: Some(3), ..Default::default() };
-        let chosen = select_move(&position, &params, &mut tt, &stop);
+        let chosen = select_move(&position, &params, tt, stop, 1);
         let after = crate::board::apply_move(&position, chosen);
         let opponent_moves = generate_legal_moves(&after);
         assert!(
@@ -484,10 +535,10 @@ mod tests {
     fn select_move_captures_hanging_queen() {
         // White rook on a5 can take free black queen on e5 (same rank, undefended)
         let position = from_fen("4k3/8/8/R3q3/8/8/8/4K3 w - - 0 1");
-        let mut tt = make_tt();
+        let tt = make_tt();
         let stop = make_stop();
         let params = GoParameters { depth: Some(3), ..Default::default() };
-        let chosen = select_move(&position, &params, &mut tt, &stop);
+        let chosen = select_move(&position, &params, tt, stop, 1);
         assert_eq!(chosen.to_square, 36, "should capture queen on e5 (square 36)");
     }
 
@@ -495,11 +546,10 @@ mod tests {
     fn negamax_returns_zero_for_stalemate() {
         // Black king stalemated: black king a8, white king b6, white queen c7
         let position = from_fen("k7/2Q5/1K6/8/8/8/8/8 b - - 0 1");
-        let mut tt = make_tt();
-        let stop = make_stop();
         let mut context = SearchContext {
-            transposition_table: &mut tt,
-            stop_flag: &stop,
+            transposition_table: Arc::new(ShardedTranspositionTable::new(4)),
+            stop_flag: Arc::new(AtomicBool::new(false)),
+            shared_nodes: Arc::new(AtomicU64::new(0)),
             limits: SearchLimits::Depth(4),
             start_time: Instant::now(),
             nodes_searched: 0,
@@ -512,11 +562,10 @@ mod tests {
     fn negamax_detects_checkmate() {
         // Fool's mate — white is in checkmate
         let position = from_fen("rnb1kbnr/pppp1ppp/8/4p3/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq - 1 3");
-        let mut tt = make_tt();
-        let stop = make_stop();
         let mut context = SearchContext {
-            transposition_table: &mut tt,
-            stop_flag: &stop,
+            transposition_table: Arc::new(ShardedTranspositionTable::new(4)),
+            stop_flag: Arc::new(AtomicBool::new(false)),
+            shared_nodes: Arc::new(AtomicU64::new(0)),
             limits: SearchLimits::Depth(1),
             start_time: Instant::now(),
             nodes_searched: 0,
@@ -526,13 +575,33 @@ mod tests {
     }
 
     #[test]
+    fn search_context_shared_nodes_accumulates_across_search() {
+        use std::sync::atomic::AtomicU64;
+        let position = crate::board::start_position();
+        let shared_nodes = Arc::new(AtomicU64::new(0));
+        let mut context = SearchContext {
+            transposition_table: Arc::new(ShardedTranspositionTable::new(4)),
+            stop_flag: Arc::new(AtomicBool::new(false)),
+            shared_nodes: Arc::clone(&shared_nodes),
+            limits: SearchLimits::Depth(2),
+            start_time: Instant::now(),
+            nodes_searched: 0,
+        };
+        negamax_pvs(&position, 2, -INF, INF, 0, &mut context);
+        // After a depth-2 search, the shared counter must have been incremented.
+        // Flush the local remainder into shared_nodes first.
+        shared_nodes.fetch_add(context.nodes_searched, Ordering::Relaxed);
+        assert!(shared_nodes.load(Ordering::Relaxed) > 0, "shared_nodes must be non-zero after search");
+    }
+
+    #[test]
     fn extract_pv_from_tt_returns_moves_up_to_depth() {
         let position = start_position();
-        let mut tt = make_tt();
+        let tt = make_tt();
         let stop = make_stop();
         let params = GoParameters { depth: Some(3), ..Default::default() };
         // Run a search so the TT is populated
-        select_move(&position, &params, &mut tt, &stop);
+        select_move(&position, &params, Arc::clone(&tt), stop, 1);
         // PV should have at least 1 move and at most 3
         let pv = extract_pv_from_tt(&position, &tt, 3);
         assert!(!pv.is_empty(), "PV must contain at least the best move");
@@ -550,12 +619,23 @@ mod tests {
     #[test]
     fn select_move_emits_uci_info_line_to_stdout() {
         let position = start_position();
-        let mut tt = make_tt();
+        let tt = make_tt();
         let stop = make_stop();
         let params = GoParameters { depth: Some(2), ..Default::default() };
         // Should not panic — this is the main assertion
-        let chosen = select_move(&position, &params, &mut tt, &stop);
+        let chosen = select_move(&position, &params, tt, stop, 1);
         let legal_moves = generate_legal_moves(&position);
         assert!(legal_moves.contains(&chosen));
+    }
+
+    #[test]
+    fn select_move_with_two_threads_returns_legal_move() {
+        let position = crate::board::start_position();
+        let legal_moves = generate_legal_moves(&position);
+        let tt = Arc::new(ShardedTranspositionTable::new(4));
+        let stop = Arc::new(AtomicBool::new(false));
+        let params = GoParameters { depth: Some(2), ..Default::default() };
+        let chosen = select_move(&position, &params, tt, stop, 2);
+        assert!(legal_moves.contains(&chosen), "two-thread search must return a legal move");
     }
 }

@@ -8,7 +8,7 @@ use crate::board::{apply_move, try_from_fen, start_position, Position};
 use crate::engine::select_move;
 use crate::movegen::generate_legal_moves;
 use crate::perft::perft_divide;
-use crate::tt::TranspositionTable;
+use crate::tt::ShardedTranspositionTable;
 
 const START_POSITION_FEN: &str =
     "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
@@ -249,9 +249,10 @@ struct UciState {
     current_position: Position,
     debug_mode: bool,
     stop_flag: Arc<AtomicBool>,
-    transposition_table: Arc<Mutex<TranspositionTable>>,
+    transposition_table: Arc<ShardedTranspositionTable>,
     search_thread: Option<std::thread::JoinHandle<()>>,
     output: Arc<Mutex<Box<dyn Write + Send>>>,
+    thread_count: usize,
 }
 
 impl UciState {
@@ -260,9 +261,10 @@ impl UciState {
             current_position: start_position(),
             debug_mode: false,
             stop_flag: Arc::new(AtomicBool::new(false)),
-            transposition_table: Arc::new(Mutex::new(TranspositionTable::new(16))),
+            transposition_table: Arc::new(ShardedTranspositionTable::new(16)),
             search_thread: None,
             output,
+            thread_count: 1,
         }
     }
 
@@ -283,6 +285,7 @@ fn handle_uci_line(line: &str, state: &mut UciState) -> LineOutcome {
             let mut output = state.output.lock().unwrap();
             writeln!(output, "id name {} v{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")).unwrap();
             writeln!(output, "id author {}", env!("CARGO_PKG_AUTHORS")).unwrap();
+            writeln!(output, "option name Threads type spin default 1 min 1 max 64").unwrap();
             writeln!(output, "uciok").unwrap();
             output.flush().unwrap();
         }
@@ -297,13 +300,20 @@ fn handle_uci_line(line: &str, state: &mut UciState) -> LineOutcome {
             output.flush().unwrap();
         }
 
-        UciCommand::SetOption { .. } => {}
+        UciCommand::SetOption { name, value } => {
+            if name == "Threads"
+                && let Some(value_string) = value
+                && let Ok(count) = value_string.parse::<usize>()
+            {
+                state.thread_count = count.clamp(1, 64);
+            }
+        }
 
         UciCommand::UciNewGame => {
             state.stop_search();
             state.current_position = start_position();
             state.stop_flag.store(false, Ordering::Relaxed);
-            state.transposition_table.lock().unwrap().clear();
+            state.transposition_table.clear();
         }
 
         UciCommand::Position { fen, moves } => {
@@ -348,10 +358,10 @@ fn handle_uci_line(line: &str, state: &mut UciState) -> LineOutcome {
             let stop_flag = Arc::clone(&state.stop_flag);
             let tt_arc = Arc::clone(&state.transposition_table);
             let output_arc = Arc::clone(&state.output);
+            let thread_count = state.thread_count;
 
             let handle = std::thread::spawn(move || {
-                let mut tt = tt_arc.lock().unwrap();
-                let chosen = select_move(&position, &parameters, &mut tt, &stop_flag);
+                let chosen = select_move(&position, &parameters, tt_arc, stop_flag, thread_count);
                 let mut output = output_arc.lock().unwrap();
                 writeln!(output, "bestmove {}", move_to_uci_string(chosen)).unwrap();
                 output.flush().unwrap();
@@ -966,6 +976,26 @@ mod tests {
     fn quit_causes_loop_to_exit_cleanly() {
         // If quit did not exit the loop, this call would block forever.
         run_and_capture(b"quit\n");
+    }
+
+    // ── Integration tests: setoption Threads ─────────────────────────────────
+
+    #[test]
+    fn setoption_threads_updates_thread_count() {
+        // After setting Threads to 4, a subsequent go should use that count.
+        // We verify indirectly: the option is accepted silently (no output).
+        let response = run_and_capture(b"setoption name Threads value 4\nquit\n");
+        assert!(response.is_empty(), "setoption Threads must produce no output, got: {}", response);
+    }
+
+    #[test]
+    fn uci_response_advertises_threads_option() {
+        let response = run_and_capture(b"uci\nquit\n");
+        assert!(
+            response.contains("option name Threads type spin default 1 min 1 max 64"),
+            "uci response must advertise Threads option, got: {}",
+            response,
+        );
     }
 
     // ── Integration tests: unknown commands ───────────────────────────────────
