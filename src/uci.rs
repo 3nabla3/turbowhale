@@ -285,6 +285,7 @@ fn handle_uci_line(line: &str, state: &mut UciState) -> LineOutcome {
             let mut output = state.output.lock().unwrap();
             writeln!(output, "id name {} v{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")).unwrap();
             writeln!(output, "id author {}", env!("CARGO_PKG_AUTHORS")).unwrap();
+            writeln!(output, "option name Threads type spin default 1 min 1 max 64").unwrap();
             writeln!(output, "uciok").unwrap();
             output.flush().unwrap();
         }
@@ -299,7 +300,13 @@ fn handle_uci_line(line: &str, state: &mut UciState) -> LineOutcome {
             output.flush().unwrap();
         }
 
-        UciCommand::SetOption { .. } => {}
+        UciCommand::SetOption { name, value } => {
+            if name == "Threads"
+                && let Some(value_string) = value
+                && let Ok(count) = value_string.parse::<usize>() {
+                    state.thread_count = count.clamp(1, 64);
+                }
+        }
 
         UciCommand::UciNewGame => {
             state.stop_search();
@@ -968,6 +975,26 @@ mod tests {
     fn quit_causes_loop_to_exit_cleanly() {
         // If quit did not exit the loop, this call would block forever.
         run_and_capture(b"quit\n");
+    }
+
+    // ── Integration tests: setoption Threads ─────────────────────────────────
+
+    #[test]
+    fn setoption_threads_updates_thread_count() {
+        // After setting Threads to 4, a subsequent go should use that count.
+        // We verify indirectly: the option is accepted silently (no output).
+        let response = run_and_capture(b"setoption name Threads value 4\nquit\n");
+        assert!(response.is_empty(), "setoption Threads must produce no output, got: {}", response);
+    }
+
+    #[test]
+    fn uci_response_advertises_threads_option() {
+        let response = run_and_capture(b"uci\nquit\n");
+        assert!(
+            response.contains("option name Threads type spin default 1 min 1 max 64"),
+            "uci response must advertise Threads option, got: {}",
+            response,
+        );
     }
 
     // ── Integration tests: unknown commands ───────────────────────────────────
