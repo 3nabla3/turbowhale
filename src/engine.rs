@@ -216,21 +216,11 @@ fn negamax_pvs(
         return 0;
     }
 
-    // Generate legal moves before depth==0 and TT checks — required to detect
-    // checkmate/stalemate correctly before any transposition table shortcut.
-    let legal_moves = generate_legal_moves(position);
-    if legal_moves.is_empty() {
-        let king_square = position.king_square(position.side_to_move);
-        let in_check = is_square_attacked(king_square, position.side_to_move.opponent(), position);
-        return if in_check {
-            -(MATE_SCORE - ply as i32)
-        } else {
-            0
-        };
-    }
+    let king_square = position.king_square(position.side_to_move);
+    let is_in_check = is_square_attacked(king_square, position.side_to_move.opponent(), position);
 
     if depth == 0 {
-        return quiescence_search(position, alpha, beta, ply, context);
+        return quiescence_search(position, alpha, beta, ply, is_in_check, context);
     }
 
     let position_hash = compute_hash(position);
@@ -259,6 +249,15 @@ fn negamax_pvs(
         }
     }
 
+    let legal_moves = generate_legal_moves(position);
+    if legal_moves.is_empty() {
+        return if is_in_check {
+            -(MATE_SCORE - ply as i32)
+        } else {
+            0
+        };
+    }
+
     let ordered_moves = order_moves(legal_moves, position, tt_best_move);
     let mut best_move = ordered_moves[0];
     let mut first_move = true;
@@ -269,11 +268,11 @@ fn negamax_pvs(
             first_move = false;
             -negamax_pvs(&child_position, depth - 1, -beta, -alpha, ply + 1, context)
         } else {
-            let null_score = -negamax_pvs(&child_position, depth - 1, -alpha - 1, -alpha, ply + 1, context);
-            if null_score > alpha && null_score < beta && beta - alpha > 1 {
+            let null_window_score = -negamax_pvs(&child_position, depth - 1, -alpha - 1, -alpha, ply + 1, context);
+            if null_window_score > alpha && null_window_score < beta && beta - alpha > 1 {
                 -negamax_pvs(&child_position, depth - 1, -beta, -alpha, ply + 1, context)
             } else {
-                null_score
+                null_window_score
             }
         };
 
@@ -310,6 +309,7 @@ fn quiescence_search(
     mut alpha: i32,
     beta: i32,
     ply: u32,
+    is_in_check: bool,
     context: &mut SearchContext,
 ) -> i32 {
     if context.stop_flag.load(Ordering::Relaxed) {
@@ -331,10 +331,7 @@ fn quiescence_search(
         }
     }
 
-    let king_square = position.king_square(position.side_to_move);
-    let in_check = is_square_attacked(king_square, position.side_to_move.opponent(), position);
-
-    if !in_check {
+    if !is_in_check {
         let stand_pat = evaluate(position);
         if stand_pat >= beta {
             return beta;
@@ -348,7 +345,7 @@ fn quiescence_search(
     let mut candidate_moves: Vec<Move> = pseudo_legal
         .into_iter()
         .filter(|&chess_move| {
-            if in_check { true } else { is_capture(chess_move, position) }
+            if is_in_check { true } else { is_capture(chess_move, position) }
         })
         .collect();
 
@@ -369,7 +366,13 @@ fn quiescence_search(
         }
         legal_move_count += 1;
 
-        let score = -quiescence_search(&child_position, -beta, -alpha, ply + 1, context);
+        let child_king_square = child_position.king_square(child_position.side_to_move);
+        let child_in_check = is_square_attacked(
+            child_king_square,
+            child_position.side_to_move.opponent(),
+            &child_position,
+        );
+        let score = -quiescence_search(&child_position, -beta, -alpha, ply + 1, child_in_check, context);
         if score >= beta {
             return beta;
         }
@@ -378,7 +381,7 @@ fn quiescence_search(
         }
     }
 
-    if in_check && legal_move_count == 0 {
+    if is_in_check && legal_move_count == 0 {
         return -(MATE_SCORE - ply as i32);
     }
 
@@ -637,5 +640,48 @@ mod tests {
         let params = GoParameters { depth: Some(2), ..Default::default() };
         let chosen = select_move(&position, &params, tt, stop, 2);
         assert!(legal_moves.contains(&chosen), "two-thread search must return a legal move");
+    }
+
+    #[test]
+    fn quiescence_search_in_check_skips_stand_pat() {
+        // White king on e1, black queen on e8 — white is in check on the e-file.
+        // With is_in_check=true the stand-pat branch is skipped.
+        // The king has legal evasions so the score must not be a mate value.
+        let position = from_fen("4q3/7k/8/8/8/8/8/4K3 w - - 0 1");
+        let mut context = SearchContext {
+            transposition_table: Arc::new(ShardedTranspositionTable::new(4)),
+            stop_flag: Arc::new(AtomicBool::new(false)),
+            shared_nodes: Arc::new(AtomicU64::new(0)),
+            limits: SearchLimits::Depth(1),
+            start_time: Instant::now(),
+            nodes_searched: 0,
+        };
+        let score = quiescence_search(&position, -INF, INF, 0, true, &mut context);
+        assert!(score > -MATE_SCORE / 2, "king has evasions — score must not be a mate loss, got {}", score);
+    }
+
+    #[test]
+    fn select_move_returns_legal_move_when_in_check() {
+        // White king on e1, black queen on e8 — white is in check, must find an evasion.
+        // Null move must not fire here.
+        let position = from_fen("4q3/7k/8/8/8/8/8/4K3 w - - 0 1");
+        let tt = make_tt();
+        let stop = make_stop();
+        let params = GoParameters { depth: Some(3), ..Default::default() };
+        let chosen = select_move(&position, &params, tt, stop, 1);
+        let legal_moves = generate_legal_moves(&position);
+        assert!(legal_moves.contains(&chosen), "must return a legal evasion when in check");
+    }
+
+    #[test]
+    fn select_move_returns_legal_move_in_king_and_pawn_endgame() {
+        // Only kings and pawns — null move must not fire (Zugzwang guard).
+        let position = from_fen("4k3/4p3/8/8/8/8/4P3/4K3 w - - 0 1");
+        let tt = make_tt();
+        let stop = make_stop();
+        let params = GoParameters { depth: Some(4), ..Default::default() };
+        let chosen = select_move(&position, &params, tt, stop, 1);
+        let legal_moves = generate_legal_moves(&position);
+        assert!(legal_moves.contains(&chosen), "must return a legal move in king-and-pawn endgame");
     }
 }
