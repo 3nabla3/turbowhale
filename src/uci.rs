@@ -303,9 +303,10 @@ fn handle_uci_line(line: &str, state: &mut UciState) -> LineOutcome {
         UciCommand::SetOption { name, value } => {
             if name == "Threads"
                 && let Some(value_string) = value
-                && let Ok(count) = value_string.parse::<usize>() {
-                    state.thread_count = count.clamp(1, 64);
-                }
+                && let Ok(count) = value_string.parse::<usize>()
+            {
+                state.thread_count = count.clamp(1, 64);
+            }
         }
 
         UciCommand::UciNewGame => {
