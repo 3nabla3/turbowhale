@@ -1,0 +1,46 @@
+name: Bump Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Version bump type'
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+jobs:
+  bump:
+    name: Bump and tag release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: Install cargo-release
+        run: cargo install cargo-release
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Run cargo release
+        run: cargo release ${{ github.event.inputs.bump }} --execute --no-confirm
+
+      # - name: Trigger release workflow on new tag
+      #   env:
+      #     GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      #   run: |
+      #     NEW_TAG=$(git describe --tags --abbrev=0)
+      #     gh workflow run release.yml --ref "$NEW_TAG"
