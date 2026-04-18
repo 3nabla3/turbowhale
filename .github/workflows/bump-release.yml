@@ -27,8 +27,10 @@ jobs:
       - name: Install Rust toolchain
         run: rustup show
 
+      - uses: cargo-bins/cargo-binstall@main
+
       - name: Install cargo-release
-        run: cargo install cargo-release
+        run: cargo binstall cargo-release --no-confirm
 
       - name: Configure git
         run: |
