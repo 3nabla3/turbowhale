@@ -38,9 +38,9 @@ jobs:
       - name: Run cargo release
         run: cargo release ${{ github.event.inputs.bump }} --execute --no-confirm
 
-      # - name: Trigger release workflow on new tag
-      #   env:
-      #     GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      #   run: |
-      #     NEW_TAG=$(git describe --tags --abbrev=0)
-      #     gh workflow run release.yml --ref "$NEW_TAG"
+      - name: Trigger release workflow on new tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          NEW_TAG=$(git describe --tags --abbrev=0)
+          gh workflow run release.yml --ref "$NEW_TAG"
