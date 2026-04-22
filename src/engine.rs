@@ -829,6 +829,109 @@ mod tests {
     }
 
     #[test]
+    fn order_moves_full_five_tier_priority_on_kiwipete() {
+        // Kiwipete — rich in captures and quiets. Verifies the full priority chain:
+        // TT move → captures (MVV-LVA) → killer 1 → killer 2 → quiets (by history).
+        let position = crate::board::from_fen(
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+        );
+        let legal = generate_legal_moves(&position);
+
+        // Pick a quiet move as the TT move (pawn push a2->a3, from=8, to=16 — legal and quiet).
+        // (Note: Ke2 would walk into the Black queen's e-file, so it is illegal in Kiwipete.)
+        let tt_move = legal
+            .iter()
+            .find(|m| m.from_square == 8 && m.to_square == 16)
+            .copied()
+            .expect("a2->a3 must be legal in Kiwipete");
+
+        // Pick two quiet killers (knight moves): Nc3->b1 and Ne5->c4.
+        let killer1 = legal
+            .iter()
+            .find(|m| m.from_square == 18 && m.to_square == 1)
+            .copied()
+            .expect("Nc3-b1 must be legal in Kiwipete");
+        let killer2 = legal
+            .iter()
+            .find(|m| m.from_square == 36 && m.to_square == 26)
+            .copied()
+            .expect("Ne5-c4 must be legal in Kiwipete");
+
+        // Pick a high-history quiet (Qf3->g3 = from=21, to=22) to verify captures still outrank it
+        // and killers still outrank it.
+        let high_history_quiet = legal
+            .iter()
+            .find(|m| m.from_square == 21 && m.to_square == 22)
+            .copied()
+            .expect("Qg3 must be legal in Kiwipete");
+
+        let mut killers = [[None; 2]; MAX_SEARCH_PLY];
+        killers[0][0] = Some(killer1);
+        killers[0][1] = Some(killer2);
+        let mut history = [[[0i32; 64]; 64]; 2];
+        // White to move -> index 0. Give the Qg3 quiet a huge history bonus.
+        history[0][21][22] = 15_000;
+
+        let ordered = order_moves(legal.clone(), &position, Some(tt_move), 0, &killers, &history);
+
+        // 1. TT move first.
+        assert_eq!(ordered[0], tt_move, "TT move must be first");
+
+        // 2. All captures come next, before either killer. Collect the indices of every capture
+        //    and of the two killers; every capture index must be strictly less than every killer index.
+        let capture_indices: Vec<usize> = ordered
+            .iter()
+            .enumerate()
+            .filter(|(_, chess_move)| is_capture(**chess_move, &position))
+            .map(|(index, _)| index)
+            .collect();
+        assert!(!capture_indices.is_empty(), "Kiwipete must contain captures — sanity check");
+        let killer1_index = ordered.iter().position(|m| *m == killer1).unwrap();
+        let killer2_index = ordered.iter().position(|m| *m == killer2).unwrap();
+        for capture_index in &capture_indices {
+            assert!(
+                *capture_index < killer1_index,
+                "captures must precede killer 1 (capture at {} vs killer1 at {})",
+                capture_index, killer1_index,
+            );
+            assert!(
+                *capture_index < killer2_index,
+                "captures must precede killer 2",
+            );
+        }
+
+        // 3. Killer 1 strictly before killer 2.
+        assert!(killer1_index < killer2_index, "killer 1 must sort before killer 2");
+
+        // 4. Both killers strictly before the high-history quiet.
+        let high_history_index = ordered.iter().position(|m| *m == high_history_quiet).unwrap();
+        assert!(
+            killer1_index < high_history_index,
+            "killer 1 must precede even a high-history quiet",
+        );
+        assert!(
+            killer2_index < high_history_index,
+            "killer 2 must precede even a high-history quiet",
+        );
+
+        // 5. The high-history quiet must sort ahead of any zero-history quiet. Verify by
+        //    locating some other zero-history quiet (king-side castle o-o: Ke1->g1, from=4, to=6)
+        //    and asserting Qg3 precedes it.
+        if let Some(zero_history_quiet) = legal
+            .iter()
+            .find(|m| m.from_square == 4 && m.to_square == 6)
+            .copied()
+        {
+            let zero_history_index = ordered.iter().position(|m| *m == zero_history_quiet).unwrap();
+            assert!(
+                high_history_index < zero_history_index,
+                "high-history quiet must precede zero-history quiet (Qg3 at {} vs O-O at {})",
+                high_history_index, zero_history_index,
+            );
+        }
+    }
+
+    #[test]
     fn select_move_returns_legal_move_in_king_and_pawn_endgame() {
         // Only kings and pawns — null move must not fire (Zugzwang guard).
         let position = from_fen("4k3/4p3/8/8/8/8/4P3/4K3 w - - 0 1");
