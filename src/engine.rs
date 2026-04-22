@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -12,6 +13,22 @@ use crate::uci::{GoParameters, move_to_uci_string};
 pub const MATE_SCORE: i32 = 100_000;
 const INF: i32 = 200_000;
 const NULL_MOVE_REDUCTION: u32 = 2;
+pub const MAX_SEARCH_PLY: usize = 128;
+
+#[allow(dead_code)]
+fn reduction_table() -> &'static [[u8; 64]; 64] {
+    static TABLE: OnceLock<[[u8; 64]; 64]> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        let mut table = [[0u8; 64]; 64];
+        for (depth, depth_row) in table.iter_mut().enumerate().skip(1) {
+            for (move_index, entry) in depth_row.iter_mut().enumerate().skip(1) {
+                let value = ((depth as f64).ln() * (move_index as f64).ln()) / 2.25;
+                *entry = value.round().max(0.0) as u8;
+            }
+        }
+        table
+    })
+}
 
 #[derive(Clone)]
 pub enum SearchLimits {
@@ -28,6 +45,10 @@ pub struct SearchContext {
     pub limits: SearchLimits,
     pub start_time: Instant,
     pub nodes_searched: u64,
+    #[allow(dead_code)]
+    pub killer_moves: [[Option<Move>; 2]; MAX_SEARCH_PLY],
+    #[allow(dead_code)]
+    pub history_scores: [[[i32; 64]; 64]; 2],
 }
 
 fn search_worker(
@@ -45,6 +66,8 @@ fn search_worker(
         limits,
         start_time,
         nodes_searched: 0,
+        killer_moves: [[None; 2]; MAX_SEARCH_PLY],
+        history_scores: [[[0i32; 64]; 64]; 2],
     };
     for depth in 1..=100 {
         negamax_pvs(&position, depth, -INF, INF, 0, &mut context);
@@ -98,6 +121,8 @@ pub fn select_move(
         limits,
         start_time,
         nodes_searched: 0,
+        killer_moves: [[None; 2]; MAX_SEARCH_PLY],
+        history_scores: [[[0i32; 64]; 64]; 2],
     };
 
     for depth in 1..=max_depth {
@@ -585,6 +610,8 @@ mod tests {
             limits: SearchLimits::Depth(4),
             start_time: Instant::now(),
             nodes_searched: 0,
+            killer_moves: [[None; 2]; MAX_SEARCH_PLY],
+            history_scores: [[[0i32; 64]; 64]; 2],
         };
         let score = negamax_pvs(&position, 4, -INF, INF, 0, &mut context);
         assert_eq!(score, 0, "stalemate should score 0");
@@ -601,6 +628,8 @@ mod tests {
             limits: SearchLimits::Depth(1),
             start_time: Instant::now(),
             nodes_searched: 0,
+            killer_moves: [[None; 2]; MAX_SEARCH_PLY],
+            history_scores: [[[0i32; 64]; 64]; 2],
         };
         let score = negamax_pvs(&position, 1, -INF, INF, 0, &mut context);
         assert!(score < -MATE_SCORE / 2, "checkmate should return large negative, got {}", score);
@@ -618,6 +647,8 @@ mod tests {
             limits: SearchLimits::Depth(2),
             start_time: Instant::now(),
             nodes_searched: 0,
+            killer_moves: [[None; 2]; MAX_SEARCH_PLY],
+            history_scores: [[[0i32; 64]; 64]; 2],
         };
         negamax_pvs(&position, 2, -INF, INF, 0, &mut context);
         // After a depth-2 search, the shared counter must have been incremented.
@@ -684,6 +715,8 @@ mod tests {
             limits: SearchLimits::Depth(1),
             start_time: Instant::now(),
             nodes_searched: 0,
+            killer_moves: [[None; 2]; MAX_SEARCH_PLY],
+            history_scores: [[[0i32; 64]; 64]; 2],
         };
         let score = quiescence_search(&position, -INF, INF, 0, true, &mut context);
         assert!(score > -MATE_SCORE / 2, "king has evasions — score must not be a mate loss, got {}", score);
@@ -700,6 +733,37 @@ mod tests {
         let chosen = select_move(&position, &params, tt, stop, 1);
         let legal_moves = generate_legal_moves(&position);
         assert!(legal_moves.contains(&chosen), "must return a legal evasion when in check");
+    }
+
+    #[test]
+    fn reduction_table_matches_log_formula() {
+        // Hand-computed sanity checks:
+        // At depth=1, move_index=1 → ln(1)*ln(1)=0 → reduction 0
+        // At depth=3, move_index=3 → ln(3)*ln(3)/2.25 ≈ 0.5365 → rounds to 1
+        // At depth=8, move_index=16 → ln(8)*ln(16)/2.25 ≈ 2.563 → rounds to 3
+        let table = reduction_table();
+        assert_eq!(table[1][1], 0);
+        assert_eq!(table[3][3], 1);
+        assert_eq!(table[8][16], 3);
+        // Table must never produce a reduction larger than depth-1 at indices we'll use
+        // (depth >= 3, move_index <= 63). Spot-check the corner.
+        assert!(table[3][63] as u32 <= 3 - 1);
+    }
+
+    #[test]
+    fn new_search_context_has_empty_killers_and_zero_history() {
+        let context = SearchContext {
+            transposition_table: Arc::new(ShardedTranspositionTable::new(4)),
+            stop_flag: Arc::new(AtomicBool::new(false)),
+            shared_nodes: Arc::new(AtomicU64::new(0)),
+            limits: SearchLimits::Depth(1),
+            start_time: Instant::now(),
+            nodes_searched: 0,
+            killer_moves: [[None; 2]; MAX_SEARCH_PLY],
+            history_scores: [[[0i32; 64]; 64]; 2],
+        };
+        assert!(context.killer_moves.iter().all(|slots| slots[0].is_none() && slots[1].is_none()));
+        assert!(context.history_scores.iter().flatten().flatten().all(|&v| v == 0));
     }
 
     #[test]
