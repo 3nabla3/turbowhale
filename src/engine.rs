@@ -45,9 +45,7 @@ pub struct SearchContext {
     pub limits: SearchLimits,
     pub start_time: Instant,
     pub nodes_searched: u64,
-    #[allow(dead_code)]
     pub killer_moves: [[Option<Move>; 2]; MAX_SEARCH_PLY],
-    #[allow(dead_code)]
     pub history_scores: [[[i32; 64]; 64]; 2],
 }
 
@@ -312,7 +310,9 @@ fn negamax_pvs(
         };
     }
 
-    let ordered_moves = order_moves(legal_moves, position, tt_best_move);
+    let ordered_moves = order_moves(
+        legal_moves, position, tt_best_move, ply, &context.killer_moves, &context.history_scores,
+    );
     let mut best_move = ordered_moves[0];
     let mut first_move = true;
 
@@ -504,15 +504,33 @@ fn mvv_lva_score(position: &Position, chess_move: Move) -> i32 {
     piece_value(victim_type) * 10 - piece_value(attacker_type)
 }
 
-fn order_moves(mut moves: Vec<Move>, position: &Position, tt_best_move: Option<Move>) -> Vec<Move> {
+fn order_moves(
+    mut moves: Vec<Move>,
+    position: &Position,
+    tt_best_move: Option<Move>,
+    ply: u32,
+    killer_moves: &[[Option<Move>; 2]; MAX_SEARCH_PLY],
+    history_scores: &[[[i32; 64]; 64]; 2],
+) -> Vec<Move> {
+    let ply_index = (ply as usize).min(MAX_SEARCH_PLY - 1);
+    let killer1 = killer_moves[ply_index][0];
+    let killer2 = killer_moves[ply_index][1];
+    let color_index = position.side_to_move as usize;
+
     moves.sort_by_cached_key(|&chess_move| {
-        if tt_best_move == Some(chess_move) {
+        if Some(chess_move) == tt_best_move {
             return i32::MIN;
         }
         if is_capture(chess_move, position) {
-            return -mvv_lva_score(position, chess_move);
+            return -10_000_000 - mvv_lva_score(position, chess_move);
         }
-        0
+        if Some(chess_move) == killer1 {
+            return -1_000_000;
+        }
+        if Some(chess_move) == killer2 {
+            return -999_999;
+        }
+        -history_scores[color_index][chess_move.from_square as usize][chess_move.to_square as usize]
     });
     moves
 }
@@ -764,6 +782,50 @@ mod tests {
         };
         assert!(context.killer_moves.iter().all(|slots| slots[0].is_none() && slots[1].is_none()));
         assert!(context.history_scores.iter().flatten().flatten().all(|&v| v == 0));
+    }
+
+    #[test]
+    fn order_moves_puts_tt_move_first_even_over_captures() {
+        // Starting position. Pick some legal non-capture move; assert it sorts
+        // ahead of captures when passed as the TT move.
+        let position = start_position();
+        let legal = generate_legal_moves(&position);
+        let e2e4 = legal.iter().find(|m| m.from_square == 12 && m.to_square == 28).copied().unwrap();
+        let killers = [[None; 2]; MAX_SEARCH_PLY];
+        let history = [[[0i32; 64]; 64]; 2];
+        let ordered = order_moves(legal, &position, Some(e2e4), 0, &killers, &history);
+        assert_eq!(ordered[0], e2e4, "TT move must be first");
+    }
+
+    #[test]
+    fn order_moves_puts_killers_before_other_quiets() {
+        let position = start_position();
+        let legal = generate_legal_moves(&position);
+        let b1c3 = legal.iter().find(|m| m.from_square == 1 && m.to_square == 18).copied().unwrap();
+        let mut killers = [[None; 2]; MAX_SEARCH_PLY];
+        killers[0][0] = Some(b1c3);
+        let history = [[[0i32; 64]; 64]; 2];
+        let ordered = order_moves(legal, &position, None, 0, &killers, &history);
+        let killer_index = ordered.iter().position(|m| *m == b1c3).unwrap();
+        // In startpos there are no captures, so the killer must be first.
+        assert_eq!(killer_index, 0, "killer must be first among quiets when no captures exist");
+    }
+
+    #[test]
+    fn order_moves_sorts_quiets_by_history_descending() {
+        let position = start_position();
+        let legal = generate_legal_moves(&position);
+        let e2e4 = legal.iter().find(|m| m.from_square == 12 && m.to_square == 28).copied().unwrap();
+        let d2d4 = legal.iter().find(|m| m.from_square == 11 && m.to_square == 27).copied().unwrap();
+        let killers = [[None; 2]; MAX_SEARCH_PLY];
+        let mut history = [[[0i32; 64]; 64]; 2];
+        // White side_to_move -> index 0.
+        history[0][11][27] = 500;  // d2->d4 high history
+        history[0][12][28] = 100;  // e2->e4 low history
+        let ordered = order_moves(legal, &position, None, 0, &killers, &history);
+        let d2d4_index = ordered.iter().position(|m| *m == d2d4).unwrap();
+        let e2e4_index = ordered.iter().position(|m| *m == e2e4).unwrap();
+        assert!(d2d4_index < e2e4_index, "higher-history quiet must come earlier");
     }
 
     #[test]
