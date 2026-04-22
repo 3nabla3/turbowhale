@@ -15,7 +15,6 @@ const INF: i32 = 200_000;
 const NULL_MOVE_REDUCTION: u32 = 2;
 pub const MAX_SEARCH_PLY: usize = 128;
 
-#[allow(dead_code)]
 fn reduction_table() -> &'static [[u8; 64]; 64] {
     static TABLE: OnceLock<[[u8; 64]; 64]> = OnceLock::new();
     TABLE.get_or_init(|| {
@@ -314,15 +313,44 @@ fn negamax_pvs(
         legal_moves, position, tt_best_move, ply, &context.killer_moves, &context.history_scores,
     );
     let mut best_move = ordered_moves[0];
-    let mut first_move = true;
 
-    for chess_move in &ordered_moves {
-        let child_position = crate::board::apply_move(position, *chess_move);
-        let score = if first_move {
-            first_move = false;
+    for (move_index, chess_move) in ordered_moves.iter().enumerate() {
+        let chess_move_value = *chess_move;
+        let child_position = crate::board::apply_move(position, chess_move_value);
+
+        let is_quiet = !is_capture(chess_move_value, position)
+            && chess_move_value.promotion_piece.is_none();
+        let ply_index_for_killer = (ply as usize).min(MAX_SEARCH_PLY - 1);
+        let is_killer = context.killer_moves[ply_index_for_killer][0] == Some(chess_move_value)
+            || context.killer_moves[ply_index_for_killer][1] == Some(chess_move_value);
+
+        let score = if move_index == 0 {
             -negamax_pvs(&child_position, depth - 1, -beta, -alpha, ply + 1, context)
         } else {
-            let null_window_score = -negamax_pvs(&child_position, depth - 1, -alpha - 1, -alpha, ply + 1, context);
+            let reduction: u32 = if depth >= 3
+                && move_index >= 3
+                && !is_in_check
+                && is_quiet
+                && !is_killer
+            {
+                let depth_index = (depth as usize).min(63);
+                let move_index_clamped = move_index.min(63);
+                reduction_table()[depth_index][move_index_clamped] as u32
+            } else {
+                0
+            };
+
+            let reduced_depth = (depth - 1).saturating_sub(reduction);
+            let reduced_score = -negamax_pvs(
+                &child_position, reduced_depth, -alpha - 1, -alpha, ply + 1, context,
+            );
+
+            let null_window_score = if reduction > 0 && reduced_score > alpha {
+                -negamax_pvs(&child_position, depth - 1, -alpha - 1, -alpha, ply + 1, context)
+            } else {
+                reduced_score
+            };
+
             if null_window_score > alpha && null_window_score < beta && beta - alpha > 1 {
                 -negamax_pvs(&child_position, depth - 1, -beta, -alpha, ply + 1, context)
             } else {
@@ -331,10 +359,9 @@ fn negamax_pvs(
         };
 
         if score >= beta {
-            let chess_move_value = *chess_move;
-            let is_quiet = !is_capture(chess_move_value, position)
+            let is_quiet_cutoff = !is_capture(chess_move_value, position)
                 && chess_move_value.promotion_piece.is_none();
-            if is_quiet && (ply as usize) < MAX_SEARCH_PLY {
+            if is_quiet_cutoff && (ply as usize) < MAX_SEARCH_PLY {
                 let ply_index = ply as usize;
                 if context.killer_moves[ply_index][0] != Some(chess_move_value) {
                     context.killer_moves[ply_index][1] = context.killer_moves[ply_index][0];
@@ -358,7 +385,7 @@ fn negamax_pvs(
         }
         if score > alpha {
             alpha = score;
-            best_move = *chess_move;
+            best_move = chess_move_value;
         }
     }
 
@@ -1017,6 +1044,39 @@ mod tests {
         // It is a capture → killers[0] must remain empty.
         assert!(context.killer_moves[0][0].is_none(), "captures must not populate killers");
         assert!(context.killer_moves[0][1].is_none(), "captures must not populate killers");
+    }
+
+    #[test]
+    fn lmr_preserves_mate_in_one() {
+        let position = crate::board::from_fen("6k1/8/6KQ/8/8/8/8/8 w - - 0 1");
+        let tt = Arc::new(ShardedTranspositionTable::new(4));
+        let stop = Arc::new(AtomicBool::new(false));
+        let params = GoParameters { depth: Some(3), ..Default::default() };
+        let chosen = select_move(&position, &params, tt, stop, 1);
+        let after = crate::board::apply_move(&position, chosen);
+        let opponent_moves = generate_legal_moves(&after);
+        assert!(opponent_moves.is_empty(), "LMR must not mask mate-in-one");
+    }
+
+    #[test]
+    fn lmr_preserves_hanging_queen_capture() {
+        let position = crate::board::from_fen("4k3/8/8/R3q3/8/8/8/4K3 w - - 0 1");
+        let tt = Arc::new(ShardedTranspositionTable::new(4));
+        let stop = Arc::new(AtomicBool::new(false));
+        let params = GoParameters { depth: Some(3), ..Default::default() };
+        let chosen = select_move(&position, &params, tt, stop, 1);
+        assert_eq!(chosen.to_square, 36, "LMR must not hide the queen capture on e5 (sq 36)");
+    }
+
+    #[test]
+    fn lmr_in_check_node_still_finds_evasion() {
+        let position = crate::board::from_fen("4q3/7k/8/8/8/8/8/4K3 w - - 0 1");
+        let tt = Arc::new(ShardedTranspositionTable::new(4));
+        let stop = Arc::new(AtomicBool::new(false));
+        let params = GoParameters { depth: Some(4), ..Default::default() };
+        let chosen = select_move(&position, &params, tt, stop, 1);
+        let legal = generate_legal_moves(&position);
+        assert!(legal.contains(&chosen), "LMR must return a legal evasion when in check");
     }
 
     #[test]
