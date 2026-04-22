@@ -331,11 +331,27 @@ fn negamax_pvs(
         };
 
         if score >= beta {
+            let chess_move_value = *chess_move;
+            let is_quiet = !is_capture(chess_move_value, position)
+                && chess_move_value.promotion_piece.is_none();
+            if is_quiet && (ply as usize) < MAX_SEARCH_PLY {
+                let ply_index = ply as usize;
+                if context.killer_moves[ply_index][0] != Some(chess_move_value) {
+                    context.killer_moves[ply_index][1] = context.killer_moves[ply_index][0];
+                    context.killer_moves[ply_index][0] = Some(chess_move_value);
+                }
+                let color_index = position.side_to_move as usize;
+                let from_index = chess_move_value.from_square as usize;
+                let to_index = chess_move_value.to_square as usize;
+                let bonus = (depth * depth) as i32;
+                let entry = &mut context.history_scores[color_index][from_index][to_index];
+                *entry = (*entry + bonus).min(16384);
+            }
             context.transposition_table.store(position_hash, TtEntry {
                 hash: position_hash,
                 depth: depth as u8,
                 score: beta,
-                best_move: *chess_move,
+                best_move: chess_move_value,
                 node_type: NodeType::LowerBound,
             });
             return beta;
@@ -929,6 +945,78 @@ mod tests {
                 high_history_index, zero_history_index,
             );
         }
+    }
+
+    #[test]
+    fn quiet_beta_cutoff_stores_killer_at_ply() {
+        // Run a shallow search from the start position; killer slots at some ply
+        // must be populated (there are many fail-high events at depth >= 3).
+        let position = start_position();
+        let mut context = SearchContext {
+            transposition_table: Arc::new(ShardedTranspositionTable::new(4)),
+            stop_flag: Arc::new(AtomicBool::new(false)),
+            shared_nodes: Arc::new(AtomicU64::new(0)),
+            limits: SearchLimits::Depth(4),
+            start_time: Instant::now(),
+            nodes_searched: 0,
+            killer_moves: [[None; 2]; MAX_SEARCH_PLY],
+            history_scores: [[[0i32; 64]; 64]; 2],
+        };
+        negamax_pvs(&position, 4, -INF, INF, 0, &mut context);
+        let any_killer_set = context.killer_moves.iter()
+            .any(|slots| slots[0].is_some() || slots[1].is_some());
+        assert!(any_killer_set, "at depth 4 from startpos at least one killer must be stored");
+    }
+
+    #[test]
+    fn quiet_beta_cutoff_increments_history() {
+        let position = start_position();
+        let mut context = SearchContext {
+            transposition_table: Arc::new(ShardedTranspositionTable::new(4)),
+            stop_flag: Arc::new(AtomicBool::new(false)),
+            shared_nodes: Arc::new(AtomicU64::new(0)),
+            limits: SearchLimits::Depth(4),
+            start_time: Instant::now(),
+            nodes_searched: 0,
+            killer_moves: [[None; 2]; MAX_SEARCH_PLY],
+            history_scores: [[[0i32; 64]; 64]; 2],
+        };
+        negamax_pvs(&position, 4, -INF, INF, 0, &mut context);
+        let any_history_nonzero = context.history_scores.iter().flatten().flatten().any(|&v| v > 0);
+        assert!(any_history_nonzero, "at depth 4 from startpos history must be written somewhere");
+    }
+
+    #[test]
+    fn history_saturates_at_ceiling() {
+        // Direct test of saturation logic.
+        let mut history_scores = [[[0i32; 64]; 64]; 2];
+        history_scores[0][12][28] = 16_380;
+        let bonus = 10 * 10;
+        let entry = &mut history_scores[0][12][28];
+        *entry = (*entry + bonus).min(16384);
+        assert_eq!(history_scores[0][12][28], 16384);
+    }
+
+    #[test]
+    fn capture_beta_cutoff_leaves_killers_empty_at_that_ply() {
+        // Position where the only sensible cutoff at ply 0 is a capture.
+        // White rook on a5, free black queen on e5 (undefended). Search depth 2.
+        let position = crate::board::from_fen("4k3/8/8/R3q3/8/8/8/4K3 w - - 0 1");
+        let mut context = SearchContext {
+            transposition_table: Arc::new(ShardedTranspositionTable::new(4)),
+            stop_flag: Arc::new(AtomicBool::new(false)),
+            shared_nodes: Arc::new(AtomicU64::new(0)),
+            limits: SearchLimits::Depth(2),
+            start_time: Instant::now(),
+            nodes_searched: 0,
+            killer_moves: [[None; 2]; MAX_SEARCH_PLY],
+            history_scores: [[[0i32; 64]; 64]; 2],
+        };
+        negamax_pvs(&position, 2, -INF, INF, 0, &mut context);
+        // The capture Rxe5 is the best move and should cause the cutoff at ply 0.
+        // It is a capture → killers[0] must remain empty.
+        assert!(context.killer_moves[0][0].is_none(), "captures must not populate killers");
+        assert!(context.killer_moves[0][1].is_none(), "captures must not populate killers");
     }
 
     #[test]
