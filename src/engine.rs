@@ -747,7 +747,7 @@ mod tests {
         assert_eq!(table[8][16], 3);
         // Table must never produce a reduction larger than depth-1 at indices we'll use
         // (depth >= 3, move_index <= 63). Spot-check the corner.
-        assert!(table[3][63] as u32 <= 3 - 1);
+        assert!(table[3][63] as u32 <= 2, "reduction at depth 3 must leave at least depth 1 remaining");
     }
 
     #[test]
