@@ -359,9 +359,7 @@ fn negamax_pvs(
         };
 
         if score >= beta {
-            let is_quiet_cutoff = !is_capture(chess_move_value, position)
-                && chess_move_value.promotion_piece.is_none();
-            if is_quiet_cutoff && (ply as usize) < MAX_SEARCH_PLY {
+            if is_quiet && (ply as usize) < MAX_SEARCH_PLY {
                 let ply_index = ply as usize;
                 if context.killer_moves[ply_index][0] != Some(chess_move_value) {
                     context.killer_moves[ply_index][1] = context.killer_moves[ply_index][0];
@@ -806,9 +804,9 @@ mod tests {
         assert_eq!(table[1][1], 0);
         assert_eq!(table[3][3], 1);
         assert_eq!(table[8][16], 3);
-        // Table must never produce a reduction larger than depth-1 at indices we'll use
-        // (depth >= 3, move_index <= 63). Spot-check the corner.
-        assert!(table[3][63] as u32 <= 2, "reduction at depth 3 must leave at least depth 1 remaining");
+        // At depth=3, move_index=63: reduction=2, so reduced_depth = (3-1).saturating_sub(2) = 0
+        // (quiescence). saturating_sub prevents underflow; the re-search on fail-high corrects it.
+        assert!(table[3][63] as u32 <= 2, "reduction at depth=3 is at most 2 (the full depth-1)");
     }
 
     #[test]
