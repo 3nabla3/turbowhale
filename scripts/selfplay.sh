@@ -57,4 +57,4 @@ fastchess \
     -openings file=scripts/openings.epd format=epd order=random \
     -sprt elo0=0 elo1=10 alpha=0.05 beta=0.05 \
     -concurrency "$concurrency" \
-    -pgnout selfplay.pgn
+    -pgnout file=selfplay.pgn notation=san
