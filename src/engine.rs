@@ -1088,4 +1088,42 @@ mod tests {
         let legal_moves = generate_legal_moves(&position);
         assert!(legal_moves.contains(&chosen), "must return a legal move in king-and-pawn endgame");
     }
+
+    #[test]
+    fn search_node_budget_regression_at_depth_7() {
+        // Captured after LMR+killers+history were wired in (243158 nodes measured).
+        // If this test starts failing, investigate whether pruning has regressed
+        // (e.g. an off-by-one in LMR guards disabling reductions) before bumping
+        // the ceiling.
+        const CEILING: u64 = 243_158 * 115 / 100; // allow 15% headroom for noise
+        let fens = [
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+        ];
+        let mut total_nodes: u64 = 0;
+        for fen in fens.iter() {
+            let position = from_fen(fen);
+            let mut context = SearchContext {
+                transposition_table: Arc::new(ShardedTranspositionTable::new(4)),
+                stop_flag: Arc::new(AtomicBool::new(false)),
+                shared_nodes: Arc::new(AtomicU64::new(0)),
+                limits: SearchLimits::Depth(7),
+                start_time: Instant::now(),
+                nodes_searched: 0,
+                killer_moves: [[None; 2]; MAX_SEARCH_PLY],
+                history_scores: [[[0i32; 64]; 64]; 2],
+            };
+            for depth in 1..=7u32 {
+                negamax_pvs(&position, depth, -INF, INF, 0, &mut context);
+            }
+            total_nodes += context.shared_nodes.load(Ordering::Relaxed) + context.nodes_searched;
+        }
+        assert!(
+            total_nodes <= CEILING,
+            "search explored {} nodes vs ceiling {} — pruning regression?",
+            total_nodes,
+            CEILING,
+        );
+    }
 }
