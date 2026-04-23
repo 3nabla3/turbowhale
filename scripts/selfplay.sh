@@ -50,8 +50,8 @@ rounds=$(( games / 2 ))
 concurrency="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)"
 
 fastchess \
-    -engine cmd="$baseline"   name="v${tag}" \
     -engine cmd="$challenger" name="dev" \
+    -engine cmd="$baseline"   name="v${tag}" \
     -each tc="$tc" proto=uci \
     -rounds "$rounds" -games 2 -repeat \
     -openings file=scripts/openings.epd format=epd order=random \
