@@ -49,6 +49,10 @@ fi
 rounds=$(( games / 2 ))
 concurrency="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)"
 
+outdir="selfplay-out"
+mkdir -p "$outdir"
+results_file="${outdir}/results-v${tag}-$(date +%Y%m%d-%H%M%S).txt"
+
 fastchess \
     -engine cmd="$challenger" name="dev" \
     -engine cmd="$baseline"   name="v${tag}" \
@@ -57,4 +61,6 @@ fastchess \
     -openings file=scripts/openings.epd format=epd order=random \
     -sprt elo0=0 elo1=10 alpha=0.05 beta=0.05 \
     -concurrency "$concurrency" \
-    -pgnout file=selfplay.pgn notation=san
+    -pgnout file="${outdir}/selfplay.pgn" notation=san \
+    -config outname="${outdir}/config.json" \
+    2>&1 | tee "$results_file"

@@ -1,3 +1,4 @@
 /target
 .env
 /engines
+/selfplay-out
