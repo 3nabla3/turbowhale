@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -12,6 +13,21 @@ use crate::uci::{GoParameters, move_to_uci_string};
 pub const MATE_SCORE: i32 = 100_000;
 const INF: i32 = 200_000;
 const NULL_MOVE_REDUCTION: u32 = 2;
+pub const MAX_SEARCH_PLY: usize = 128;
+
+fn reduction_table() -> &'static [[u8; 64]; 64] {
+    static TABLE: OnceLock<[[u8; 64]; 64]> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        let mut table = [[0u8; 64]; 64];
+        for (depth, depth_row) in table.iter_mut().enumerate().skip(1) {
+            for (move_index, entry) in depth_row.iter_mut().enumerate().skip(1) {
+                let value = ((depth as f64).ln() * (move_index as f64).ln()) / 2.25;
+                *entry = value.round().max(0.0) as u8;
+            }
+        }
+        table
+    })
+}
 
 #[derive(Clone)]
 pub enum SearchLimits {
@@ -28,6 +44,8 @@ pub struct SearchContext {
     pub limits: SearchLimits,
     pub start_time: Instant,
     pub nodes_searched: u64,
+    pub killer_moves: [[Option<Move>; 2]; MAX_SEARCH_PLY],
+    pub history_scores: [[[i32; 64]; 64]; 2],
 }
 
 fn search_worker(
@@ -45,6 +63,8 @@ fn search_worker(
         limits,
         start_time,
         nodes_searched: 0,
+        killer_moves: [[None; 2]; MAX_SEARCH_PLY],
+        history_scores: [[[0i32; 64]; 64]; 2],
     };
     for depth in 1..=100 {
         negamax_pvs(&position, depth, -INF, INF, 0, &mut context);
@@ -98,6 +118,8 @@ pub fn select_move(
         limits,
         start_time,
         nodes_searched: 0,
+        killer_moves: [[None; 2]; MAX_SEARCH_PLY],
+        history_scores: [[[0i32; 64]; 64]; 2],
     };
 
     for depth in 1..=max_depth {
@@ -287,17 +309,48 @@ fn negamax_pvs(
         };
     }
 
-    let ordered_moves = order_moves(legal_moves, position, tt_best_move);
+    let ordered_moves = order_moves(
+        legal_moves, position, tt_best_move, ply, &context.killer_moves, &context.history_scores,
+    );
     let mut best_move = ordered_moves[0];
-    let mut first_move = true;
 
-    for chess_move in &ordered_moves {
-        let child_position = crate::board::apply_move(position, *chess_move);
-        let score = if first_move {
-            first_move = false;
+    for (move_index, chess_move) in ordered_moves.iter().enumerate() {
+        let chess_move_value = *chess_move;
+        let child_position = crate::board::apply_move(position, chess_move_value);
+
+        let is_quiet = !is_capture(chess_move_value, position)
+            && chess_move_value.promotion_piece.is_none();
+        let ply_index_for_killer = (ply as usize).min(MAX_SEARCH_PLY - 1);
+        let is_killer = context.killer_moves[ply_index_for_killer][0] == Some(chess_move_value)
+            || context.killer_moves[ply_index_for_killer][1] == Some(chess_move_value);
+
+        let score = if move_index == 0 {
             -negamax_pvs(&child_position, depth - 1, -beta, -alpha, ply + 1, context)
         } else {
-            let null_window_score = -negamax_pvs(&child_position, depth - 1, -alpha - 1, -alpha, ply + 1, context);
+            let reduction: u32 = if depth >= 3
+                && move_index >= 3
+                && !is_in_check
+                && is_quiet
+                && !is_killer
+            {
+                let depth_index = (depth as usize).min(63);
+                let move_index_clamped = move_index.min(63);
+                reduction_table()[depth_index][move_index_clamped] as u32
+            } else {
+                0
+            };
+
+            let reduced_depth = (depth - 1).saturating_sub(reduction);
+            let reduced_score = -negamax_pvs(
+                &child_position, reduced_depth, -alpha - 1, -alpha, ply + 1, context,
+            );
+
+            let null_window_score = if reduction > 0 && reduced_score > alpha {
+                -negamax_pvs(&child_position, depth - 1, -alpha - 1, -alpha, ply + 1, context)
+            } else {
+                reduced_score
+            };
+
             if null_window_score > alpha && null_window_score < beta && beta - alpha > 1 {
                 -negamax_pvs(&child_position, depth - 1, -beta, -alpha, ply + 1, context)
             } else {
@@ -306,18 +359,31 @@ fn negamax_pvs(
         };
 
         if score >= beta {
+            if is_quiet && (ply as usize) < MAX_SEARCH_PLY {
+                let ply_index = ply as usize;
+                if context.killer_moves[ply_index][0] != Some(chess_move_value) {
+                    context.killer_moves[ply_index][1] = context.killer_moves[ply_index][0];
+                    context.killer_moves[ply_index][0] = Some(chess_move_value);
+                }
+                let color_index = position.side_to_move as usize;
+                let from_index = chess_move_value.from_square as usize;
+                let to_index = chess_move_value.to_square as usize;
+                let bonus = (depth * depth) as i32;
+                let entry = &mut context.history_scores[color_index][from_index][to_index];
+                *entry = (*entry + bonus).min(16384);
+            }
             context.transposition_table.store(position_hash, TtEntry {
                 hash: position_hash,
                 depth: depth as u8,
                 score: beta,
-                best_move: *chess_move,
+                best_move: chess_move_value,
                 node_type: NodeType::LowerBound,
             });
             return beta;
         }
         if score > alpha {
             alpha = score;
-            best_move = *chess_move;
+            best_move = chess_move_value;
         }
     }
 
@@ -479,15 +545,33 @@ fn mvv_lva_score(position: &Position, chess_move: Move) -> i32 {
     piece_value(victim_type) * 10 - piece_value(attacker_type)
 }
 
-fn order_moves(mut moves: Vec<Move>, position: &Position, tt_best_move: Option<Move>) -> Vec<Move> {
+fn order_moves(
+    mut moves: Vec<Move>,
+    position: &Position,
+    tt_best_move: Option<Move>,
+    ply: u32,
+    killer_moves: &[[Option<Move>; 2]; MAX_SEARCH_PLY],
+    history_scores: &[[[i32; 64]; 64]; 2],
+) -> Vec<Move> {
+    let ply_index = (ply as usize).min(MAX_SEARCH_PLY - 1);
+    let killer1 = killer_moves[ply_index][0];
+    let killer2 = killer_moves[ply_index][1];
+    let color_index = position.side_to_move as usize;
+
     moves.sort_by_cached_key(|&chess_move| {
-        if tt_best_move == Some(chess_move) {
+        if Some(chess_move) == tt_best_move {
             return i32::MIN;
         }
         if is_capture(chess_move, position) {
-            return -mvv_lva_score(position, chess_move);
+            return -10_000_000 - mvv_lva_score(position, chess_move);
         }
-        0
+        if Some(chess_move) == killer1 {
+            return -1_000_000;
+        }
+        if Some(chess_move) == killer2 {
+            return -999_999;
+        }
+        -history_scores[color_index][chess_move.from_square as usize][chess_move.to_square as usize]
     });
     moves
 }
@@ -585,6 +669,8 @@ mod tests {
             limits: SearchLimits::Depth(4),
             start_time: Instant::now(),
             nodes_searched: 0,
+            killer_moves: [[None; 2]; MAX_SEARCH_PLY],
+            history_scores: [[[0i32; 64]; 64]; 2],
         };
         let score = negamax_pvs(&position, 4, -INF, INF, 0, &mut context);
         assert_eq!(score, 0, "stalemate should score 0");
@@ -601,6 +687,8 @@ mod tests {
             limits: SearchLimits::Depth(1),
             start_time: Instant::now(),
             nodes_searched: 0,
+            killer_moves: [[None; 2]; MAX_SEARCH_PLY],
+            history_scores: [[[0i32; 64]; 64]; 2],
         };
         let score = negamax_pvs(&position, 1, -INF, INF, 0, &mut context);
         assert!(score < -MATE_SCORE / 2, "checkmate should return large negative, got {}", score);
@@ -618,6 +706,8 @@ mod tests {
             limits: SearchLimits::Depth(2),
             start_time: Instant::now(),
             nodes_searched: 0,
+            killer_moves: [[None; 2]; MAX_SEARCH_PLY],
+            history_scores: [[[0i32; 64]; 64]; 2],
         };
         negamax_pvs(&position, 2, -INF, INF, 0, &mut context);
         // After a depth-2 search, the shared counter must have been incremented.
@@ -684,6 +774,8 @@ mod tests {
             limits: SearchLimits::Depth(1),
             start_time: Instant::now(),
             nodes_searched: 0,
+            killer_moves: [[None; 2]; MAX_SEARCH_PLY],
+            history_scores: [[[0i32; 64]; 64]; 2],
         };
         let score = quiescence_search(&position, -INF, INF, 0, true, &mut context);
         assert!(score > -MATE_SCORE / 2, "king has evasions — score must not be a mate loss, got {}", score);
@@ -703,6 +795,289 @@ mod tests {
     }
 
     #[test]
+    fn reduction_table_matches_log_formula() {
+        // Hand-computed sanity checks:
+        // At depth=1, move_index=1 → ln(1)*ln(1)=0 → reduction 0
+        // At depth=3, move_index=3 → ln(3)*ln(3)/2.25 ≈ 0.5365 → rounds to 1
+        // At depth=8, move_index=16 → ln(8)*ln(16)/2.25 ≈ 2.563 → rounds to 3
+        let table = reduction_table();
+        assert_eq!(table[1][1], 0);
+        assert_eq!(table[3][3], 1);
+        assert_eq!(table[8][16], 3);
+        // At depth=3, move_index=63: reduction=2, so reduced_depth = (3-1).saturating_sub(2) = 0
+        // (quiescence). saturating_sub prevents underflow; the re-search on fail-high corrects it.
+        assert!(table[3][63] as u32 <= 2, "reduction at depth=3 is at most 2 (the full depth-1)");
+    }
+
+    #[test]
+    fn new_search_context_has_empty_killers_and_zero_history() {
+        let context = SearchContext {
+            transposition_table: Arc::new(ShardedTranspositionTable::new(4)),
+            stop_flag: Arc::new(AtomicBool::new(false)),
+            shared_nodes: Arc::new(AtomicU64::new(0)),
+            limits: SearchLimits::Depth(1),
+            start_time: Instant::now(),
+            nodes_searched: 0,
+            killer_moves: [[None; 2]; MAX_SEARCH_PLY],
+            history_scores: [[[0i32; 64]; 64]; 2],
+        };
+        assert!(context.killer_moves.iter().all(|slots| slots[0].is_none() && slots[1].is_none()));
+        assert!(context.history_scores.iter().flatten().flatten().all(|&v| v == 0));
+    }
+
+    #[test]
+    fn order_moves_puts_tt_move_first_even_over_captures() {
+        // Starting position. Pick some legal non-capture move; assert it sorts
+        // ahead of captures when passed as the TT move.
+        let position = start_position();
+        let legal = generate_legal_moves(&position);
+        let e2e4 = legal.iter().find(|m| m.from_square == 12 && m.to_square == 28).copied().unwrap();
+        let killers = [[None; 2]; MAX_SEARCH_PLY];
+        let history = [[[0i32; 64]; 64]; 2];
+        let ordered = order_moves(legal, &position, Some(e2e4), 0, &killers, &history);
+        assert_eq!(ordered[0], e2e4, "TT move must be first");
+    }
+
+    #[test]
+    fn order_moves_puts_killers_before_other_quiets() {
+        let position = start_position();
+        let legal = generate_legal_moves(&position);
+        let b1c3 = legal.iter().find(|m| m.from_square == 1 && m.to_square == 18).copied().unwrap();
+        let mut killers = [[None; 2]; MAX_SEARCH_PLY];
+        killers[0][0] = Some(b1c3);
+        let history = [[[0i32; 64]; 64]; 2];
+        let ordered = order_moves(legal, &position, None, 0, &killers, &history);
+        let killer_index = ordered.iter().position(|m| *m == b1c3).unwrap();
+        // In startpos there are no captures, so the killer must be first.
+        assert_eq!(killer_index, 0, "killer must be first among quiets when no captures exist");
+    }
+
+    #[test]
+    fn order_moves_sorts_quiets_by_history_descending() {
+        let position = start_position();
+        let legal = generate_legal_moves(&position);
+        let e2e4 = legal.iter().find(|m| m.from_square == 12 && m.to_square == 28).copied().unwrap();
+        let d2d4 = legal.iter().find(|m| m.from_square == 11 && m.to_square == 27).copied().unwrap();
+        let killers = [[None; 2]; MAX_SEARCH_PLY];
+        let mut history = [[[0i32; 64]; 64]; 2];
+        // White side_to_move -> index 0.
+        history[0][11][27] = 500;  // d2->d4 high history
+        history[0][12][28] = 100;  // e2->e4 low history
+        let ordered = order_moves(legal, &position, None, 0, &killers, &history);
+        let d2d4_index = ordered.iter().position(|m| *m == d2d4).unwrap();
+        let e2e4_index = ordered.iter().position(|m| *m == e2e4).unwrap();
+        assert!(d2d4_index < e2e4_index, "higher-history quiet must come earlier");
+    }
+
+    #[test]
+    fn order_moves_full_five_tier_priority_on_kiwipete() {
+        // Kiwipete — rich in captures and quiets. Verifies the full priority chain:
+        // TT move → captures (MVV-LVA) → killer 1 → killer 2 → quiets (by history).
+        let position = crate::board::from_fen(
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+        );
+        let legal = generate_legal_moves(&position);
+
+        // Pick a quiet move as the TT move (pawn push a2->a3, from=8, to=16 — legal and quiet).
+        // (Note: Ke2 would walk into the Black queen's e-file, so it is illegal in Kiwipete.)
+        let tt_move = legal
+            .iter()
+            .find(|m| m.from_square == 8 && m.to_square == 16)
+            .copied()
+            .expect("a2->a3 must be legal in Kiwipete");
+
+        // Pick two quiet killers (knight moves): Nc3->b1 and Ne5->c4.
+        let killer1 = legal
+            .iter()
+            .find(|m| m.from_square == 18 && m.to_square == 1)
+            .copied()
+            .expect("Nc3-b1 must be legal in Kiwipete");
+        let killer2 = legal
+            .iter()
+            .find(|m| m.from_square == 36 && m.to_square == 26)
+            .copied()
+            .expect("Ne5-c4 must be legal in Kiwipete");
+
+        // Pick a high-history quiet (Qf3->g3 = from=21, to=22) to verify captures still outrank it
+        // and killers still outrank it.
+        let high_history_quiet = legal
+            .iter()
+            .find(|m| m.from_square == 21 && m.to_square == 22)
+            .copied()
+            .expect("Qg3 must be legal in Kiwipete");
+
+        let mut killers = [[None; 2]; MAX_SEARCH_PLY];
+        killers[0][0] = Some(killer1);
+        killers[0][1] = Some(killer2);
+        let mut history = [[[0i32; 64]; 64]; 2];
+        // White to move -> index 0. Give the Qg3 quiet a huge history bonus.
+        history[0][21][22] = 15_000;
+
+        let ordered = order_moves(legal.clone(), &position, Some(tt_move), 0, &killers, &history);
+
+        // 1. TT move first.
+        assert_eq!(ordered[0], tt_move, "TT move must be first");
+
+        // 2. All captures come next, before either killer. Collect the indices of every capture
+        //    and of the two killers; every capture index must be strictly less than every killer index.
+        let capture_indices: Vec<usize> = ordered
+            .iter()
+            .enumerate()
+            .filter(|(_, chess_move)| is_capture(**chess_move, &position))
+            .map(|(index, _)| index)
+            .collect();
+        assert!(!capture_indices.is_empty(), "Kiwipete must contain captures — sanity check");
+        let killer1_index = ordered.iter().position(|m| *m == killer1).unwrap();
+        let killer2_index = ordered.iter().position(|m| *m == killer2).unwrap();
+        for capture_index in &capture_indices {
+            assert!(
+                *capture_index < killer1_index,
+                "captures must precede killer 1 (capture at {} vs killer1 at {})",
+                capture_index, killer1_index,
+            );
+            assert!(
+                *capture_index < killer2_index,
+                "captures must precede killer 2",
+            );
+        }
+
+        // 3. Killer 1 strictly before killer 2.
+        assert!(killer1_index < killer2_index, "killer 1 must sort before killer 2");
+
+        // 4. Both killers strictly before the high-history quiet.
+        let high_history_index = ordered.iter().position(|m| *m == high_history_quiet).unwrap();
+        assert!(
+            killer1_index < high_history_index,
+            "killer 1 must precede even a high-history quiet",
+        );
+        assert!(
+            killer2_index < high_history_index,
+            "killer 2 must precede even a high-history quiet",
+        );
+
+        // 5. The high-history quiet must sort ahead of any zero-history quiet. Verify by
+        //    locating some other zero-history quiet (king-side castle o-o: Ke1->g1, from=4, to=6)
+        //    and asserting Qg3 precedes it.
+        if let Some(zero_history_quiet) = legal
+            .iter()
+            .find(|m| m.from_square == 4 && m.to_square == 6)
+            .copied()
+        {
+            let zero_history_index = ordered.iter().position(|m| *m == zero_history_quiet).unwrap();
+            assert!(
+                high_history_index < zero_history_index,
+                "high-history quiet must precede zero-history quiet (Qg3 at {} vs O-O at {})",
+                high_history_index, zero_history_index,
+            );
+        }
+    }
+
+    #[test]
+    fn quiet_beta_cutoff_stores_killer_at_ply() {
+        // Run a shallow search from the start position; killer slots at some ply
+        // must be populated (there are many fail-high events at depth >= 3).
+        let position = start_position();
+        let mut context = SearchContext {
+            transposition_table: Arc::new(ShardedTranspositionTable::new(4)),
+            stop_flag: Arc::new(AtomicBool::new(false)),
+            shared_nodes: Arc::new(AtomicU64::new(0)),
+            limits: SearchLimits::Depth(4),
+            start_time: Instant::now(),
+            nodes_searched: 0,
+            killer_moves: [[None; 2]; MAX_SEARCH_PLY],
+            history_scores: [[[0i32; 64]; 64]; 2],
+        };
+        negamax_pvs(&position, 4, -INF, INF, 0, &mut context);
+        let any_killer_set = context.killer_moves.iter()
+            .any(|slots| slots[0].is_some() || slots[1].is_some());
+        assert!(any_killer_set, "at depth 4 from startpos at least one killer must be stored");
+    }
+
+    #[test]
+    fn quiet_beta_cutoff_increments_history() {
+        let position = start_position();
+        let mut context = SearchContext {
+            transposition_table: Arc::new(ShardedTranspositionTable::new(4)),
+            stop_flag: Arc::new(AtomicBool::new(false)),
+            shared_nodes: Arc::new(AtomicU64::new(0)),
+            limits: SearchLimits::Depth(4),
+            start_time: Instant::now(),
+            nodes_searched: 0,
+            killer_moves: [[None; 2]; MAX_SEARCH_PLY],
+            history_scores: [[[0i32; 64]; 64]; 2],
+        };
+        negamax_pvs(&position, 4, -INF, INF, 0, &mut context);
+        let any_history_nonzero = context.history_scores.iter().flatten().flatten().any(|&v| v > 0);
+        assert!(any_history_nonzero, "at depth 4 from startpos history must be written somewhere");
+    }
+
+    #[test]
+    fn history_saturates_at_ceiling() {
+        // Direct test of saturation logic.
+        let mut history_scores = [[[0i32; 64]; 64]; 2];
+        history_scores[0][12][28] = 16_380;
+        let bonus = 10 * 10;
+        let entry = &mut history_scores[0][12][28];
+        *entry = (*entry + bonus).min(16384);
+        assert_eq!(history_scores[0][12][28], 16384);
+    }
+
+    #[test]
+    fn capture_beta_cutoff_leaves_killers_empty_at_that_ply() {
+        // Position where the only sensible cutoff at ply 0 is a capture.
+        // White rook on a5, free black queen on e5 (undefended). Search depth 2.
+        let position = crate::board::from_fen("4k3/8/8/R3q3/8/8/8/4K3 w - - 0 1");
+        let mut context = SearchContext {
+            transposition_table: Arc::new(ShardedTranspositionTable::new(4)),
+            stop_flag: Arc::new(AtomicBool::new(false)),
+            shared_nodes: Arc::new(AtomicU64::new(0)),
+            limits: SearchLimits::Depth(2),
+            start_time: Instant::now(),
+            nodes_searched: 0,
+            killer_moves: [[None; 2]; MAX_SEARCH_PLY],
+            history_scores: [[[0i32; 64]; 64]; 2],
+        };
+        negamax_pvs(&position, 2, -INF, INF, 0, &mut context);
+        // The capture Rxe5 is the best move and should cause the cutoff at ply 0.
+        // It is a capture → killers[0] must remain empty.
+        assert!(context.killer_moves[0][0].is_none(), "captures must not populate killers");
+        assert!(context.killer_moves[0][1].is_none(), "captures must not populate killers");
+    }
+
+    #[test]
+    fn lmr_preserves_mate_in_one() {
+        let position = crate::board::from_fen("6k1/8/6KQ/8/8/8/8/8 w - - 0 1");
+        let tt = Arc::new(ShardedTranspositionTable::new(4));
+        let stop = Arc::new(AtomicBool::new(false));
+        let params = GoParameters { depth: Some(3), ..Default::default() };
+        let chosen = select_move(&position, &params, tt, stop, 1);
+        let after = crate::board::apply_move(&position, chosen);
+        let opponent_moves = generate_legal_moves(&after);
+        assert!(opponent_moves.is_empty(), "LMR must not mask mate-in-one");
+    }
+
+    #[test]
+    fn lmr_preserves_hanging_queen_capture() {
+        let position = crate::board::from_fen("4k3/8/8/R3q3/8/8/8/4K3 w - - 0 1");
+        let tt = Arc::new(ShardedTranspositionTable::new(4));
+        let stop = Arc::new(AtomicBool::new(false));
+        let params = GoParameters { depth: Some(3), ..Default::default() };
+        let chosen = select_move(&position, &params, tt, stop, 1);
+        assert_eq!(chosen.to_square, 36, "LMR must not hide the queen capture on e5 (sq 36)");
+    }
+
+    #[test]
+    fn lmr_in_check_node_still_finds_evasion() {
+        let position = crate::board::from_fen("4q3/7k/8/8/8/8/8/4K3 w - - 0 1");
+        let tt = Arc::new(ShardedTranspositionTable::new(4));
+        let stop = Arc::new(AtomicBool::new(false));
+        let params = GoParameters { depth: Some(4), ..Default::default() };
+        let chosen = select_move(&position, &params, tt, stop, 1);
+        let legal = generate_legal_moves(&position);
+        assert!(legal.contains(&chosen), "LMR must return a legal evasion when in check");
+    }
+
+    #[test]
     fn select_move_returns_legal_move_in_king_and_pawn_endgame() {
         // Only kings and pawns — null move must not fire (Zugzwang guard).
         let position = from_fen("4k3/4p3/8/8/8/8/4P3/4K3 w - - 0 1");
@@ -712,5 +1087,43 @@ mod tests {
         let chosen = select_move(&position, &params, tt, stop, 1);
         let legal_moves = generate_legal_moves(&position);
         assert!(legal_moves.contains(&chosen), "must return a legal move in king-and-pawn endgame");
+    }
+
+    #[test]
+    fn search_node_budget_regression_at_depth_7() {
+        // Captured after LMR+killers+history were wired in (243158 nodes measured).
+        // If this test starts failing, investigate whether pruning has regressed
+        // (e.g. an off-by-one in LMR guards disabling reductions) before bumping
+        // the ceiling.
+        const CEILING: u64 = 243_158 * 115 / 100; // allow 15% headroom for noise
+        let fens = [
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+        ];
+        let mut total_nodes: u64 = 0;
+        for fen in fens.iter() {
+            let position = from_fen(fen);
+            let mut context = SearchContext {
+                transposition_table: Arc::new(ShardedTranspositionTable::new(4)),
+                stop_flag: Arc::new(AtomicBool::new(false)),
+                shared_nodes: Arc::new(AtomicU64::new(0)),
+                limits: SearchLimits::Depth(7),
+                start_time: Instant::now(),
+                nodes_searched: 0,
+                killer_moves: [[None; 2]; MAX_SEARCH_PLY],
+                history_scores: [[[0i32; 64]; 64]; 2],
+            };
+            for depth in 1..=7u32 {
+                negamax_pvs(&position, depth, -INF, INF, 0, &mut context);
+            }
+            total_nodes += context.shared_nodes.load(Ordering::Relaxed) + context.nodes_searched;
+        }
+        assert!(
+            total_nodes <= CEILING,
+            "search explored {} nodes vs ceiling {} — pruning regression?",
+            total_nodes,
+            CEILING,
+        );
     }
 }
